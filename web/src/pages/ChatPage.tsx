@@ -39,7 +39,10 @@ import { latchChatActivation } from "@/lib/chat-activation";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import { normalizeSessionTitle } from "@/lib/chat-title";
 import { createPtyCompositionForwarder } from "@/lib/pty-composition";
-import { shouldRestoreTerminalFocus } from "@/lib/pty-focus";
+import {
+  isTerminalFocusReport,
+  shouldRestoreTerminalFocus,
+} from "@/lib/pty-focus";
 import { PtyResumeSanitizer } from "@/lib/pty-resume-sanitizer";
 import {
   PTY_CONNECTING_TIMEOUT_MS,
@@ -1443,7 +1446,17 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         // Mouse reports (scroll wheel etc.) are not typed input — swallow
         // them before the blocked-input check so scrolling a disconnected
         // terminal doesn't trip the "reconnecting" notice.
-        if (SGR_MOUSE_RE.test(data)) {
+        //
+        // Focus reports (`\x1b[I` / `\x1b[O`, DECSET 1004) are dropped for a
+        // different reason: hermes-ink answers every focus-in with a full
+        // erase + repaint, which is right for a native emulator's hidden
+        // tab but in the browser fires on every window focus (alt-tab back,
+        // clicking from the sidebar into the terminal, our own
+        // term.focus() calls) and visibly scrolls a long transcript to the
+        // top and back down each time. The embed never hides the PTY's
+        // output, so there is nothing to heal — Ink runs in its
+        // focus-unknown state, exactly as on an emulator without 1004.
+        if (SGR_MOUSE_RE.test(data) || isTerminalFocusReport(data)) {
           return;
         }
 
@@ -1476,7 +1489,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       // normal onData path.
       sendComposedText = (data) => forwardPtyData(data, false);
       onDataDisposable = term.onData((data) => {
-        if (!SGR_MOUSE_RE.test(data)) {
+        if (!SGR_MOUSE_RE.test(data) && !isTerminalFocusReport(data)) {
           compositionForwarder.noteTerminalData(data);
         }
         forwardPtyData(data);
