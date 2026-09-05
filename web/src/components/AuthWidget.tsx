@@ -142,18 +142,23 @@ export function AuthWidget({ className }: AuthWidgetProps) {
           via {me.provider}
         </span>
       </div>
+      {/* A labelled, bordered button rather than a bare 14px glyph: the
+          only sign-out affordance on the dashboard sits in the densest
+          corner of the sidebar and was routinely missed. */}
       <button
         type="button"
         onClick={handleLogout}
         className={cn(
-          "shrink-0 rounded p-1.5 text-muted-foreground/70",
-          "transition-colors hover:bg-current/10 hover:text-foreground",
+          "flex shrink-0 items-center gap-1.5 rounded border border-current/30 px-2 py-1",
+          "text-[0.65rem] font-semibold uppercase tracking-[0.08em] text-foreground/80",
+          "transition-colors hover:border-current/60 hover:bg-current/10 hover:text-foreground",
           "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-current/40",
         )}
         aria-label="Log out"
         title="Log out"
       >
-        <LogOut className="h-3.5 w-3.5" />
+        <LogOut className="h-4 w-4" aria-hidden="true" />
+        <span>Log out</span>
       </button>
     </div>
   );
