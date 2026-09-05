@@ -18,6 +18,7 @@
 
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
+import { SerializeAddon } from "@xterm/addon-serialize";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
@@ -41,6 +42,12 @@ import { normalizeSessionTitle } from "@/lib/chat-title";
 import { createPtyCompositionForwarder } from "@/lib/pty-composition";
 import { isTerminalFocusReport } from "@/lib/pty-focus";
 import { PtyResumeSanitizer } from "@/lib/pty-resume-sanitizer";
+import {
+  PTY_SNAPSHOT_SCROLLBACK_ROWS,
+  loadPtySnapshot,
+  ptySnapshotKey,
+  savePtySnapshot,
+} from "@/lib/pty-snapshot";
 import {
   PTY_CONNECTING_TIMEOUT_MS,
   PTY_RECONNECT_INPUT_MESSAGE,
@@ -240,6 +247,10 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   // Covers the blank terminal + blinking-cursor window so users don't think
   // chat is broken; clears as soon as there is something to show.
   const [resumeHydrating, setResumeHydrating] = useState(false);
+  // Last-seen screen of the chat being resumed (pty-snapshot), painted over
+  // the terminal while the replay runs so a chat switch shows content at
+  // once instead of a blank pane under the wait notice.
+  const [resumeSnapshotHtml, setResumeSnapshotHtml] = useState<string | null>(null);
   const [lastCloseCode, setLastCloseCode] = useState<number | null>(null);
   // NS-504: when the agent process exits cleanly (the user typed `/exit`, or
   // started a new session that ended the current PTY child), the PTY socket
@@ -816,6 +827,9 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
 
     term.loadAddon(new WebLinksAddon());
 
+    const serialize = new SerializeAddon();
+    term.loadAddon(serialize);
+
     let mobileInputCleanup: (() => void) | null = null;
     // xterm occasionally drops committed dead-key/IME text instead of emitting
     // onData. The compositionend event supplies the authoritative text.
@@ -1094,12 +1108,45 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         resumeQuietTimer = null;
       }
     };
+    // True once the resume replay has settled — only then is the screen
+    // worth snapshotting for the next visit to this chat.
+    let resumeHydrated = !resumeParam;
     const finishResumeHydration = () => {
       clearResumeLoadingTimers();
+      resumeHydrated = true;
       if (!unmounting) {
         setResumeHydrating(false);
       }
     };
+    const snapshotKey = resumeParam
+      ? ptySnapshotKey(resumeParam, `${scopedProfile}`)
+      : null;
+    const saveSnapshot = () => {
+      if (!snapshotKey || !resumeHydrated) return;
+      try {
+        savePtySnapshot(
+          window.localStorage,
+          snapshotKey,
+          serialize.serializeAsHTML({
+            scrollback: PTY_SNAPSHOT_SCROLLBACK_ROWS,
+            onlySelection: false,
+            includeGlobalBackground: true,
+          }),
+          {
+            family: String(term.options.fontFamily),
+            sizePx: Number(term.options.fontSize),
+            lineHeight: Number(term.options.lineHeight),
+          },
+        );
+      } catch {
+        /* best-effort: blocked storage or serialize failure */
+      }
+    };
+    setResumeSnapshotHtml(
+      snapshotKey ? loadPtySnapshot(window.localStorage, snapshotKey) : null,
+    );
+    // A reload/close is the other way to leave a chat.
+    window.addEventListener("pagehide", saveSnapshot);
     const noteResumePtyChunk = (chunkText: string) => {
       if (!effectiveResume || unmounting) {
         return;
@@ -1281,6 +1328,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         }, PTY_RESUME_SANITIZE_WINDOW_MS);
       }
       if (!resumeMaxTimer) {
+        resumeHydrated = false;
         setResumeHydrating(true);
         resumeMaxTimer = setTimeout(
           finishResumeHydration,
@@ -1519,6 +1567,8 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
 
     return () => {
       unmounting = true;
+      window.removeEventListener("pagehide", saveSnapshot);
+      saveSnapshot();
       imageUploadDisposed = true;
       syncMetricsRef.current = null;
       clearEraseSuppressionTimer();
@@ -1873,6 +1923,19 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
                 </Button>
               </div>
             </div>
+          )}
+
+          {/* Snapshot of this chat from the last visit, bottom-anchored (the
+              overflow clips the top, no scroll JS), under the wait notice and
+              over the transparent live terminal until the replay settles.
+              Our own serialize-addon output from localStorage, same origin. */}
+          {showResumeLoadingOverlay && resumeSnapshotHtml && (
+            <div
+              className="pointer-events-none absolute inset-0 z-10 flex flex-col justify-end overflow-hidden p-2 sm:p-3"
+              aria-hidden="true"
+              style={{ backgroundColor: terminalBg }}
+              dangerouslySetInnerHTML={{ __html: resumeSnapshotHtml }}
+            />
           )}
 
           {showResumeLoadingOverlay && (
