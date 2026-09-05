@@ -3,18 +3,24 @@ import { describe, expect, it } from "vitest";
 import { PtyResumeSanitizer } from "./pty-resume-sanitizer";
 import {
   PTY_RESUME_LOADING_MAX_MS,
-  shouldFinishResumeHydrationOnChunk,
+  PTY_RESUME_QUIET_MS,
+  isResumeReplayChunk,
   shouldShowResumeLoadingOverlay,
 } from "./pty-resume-loading";
 
-describe("shouldFinishResumeHydrationOnChunk", () => {
-  it("finishes on the first non-empty chunk", () => {
-    expect(shouldFinishResumeHydrationOnChunk("")).toBe(false);
-    expect(shouldFinishResumeHydrationOnChunk("hello")).toBe(true);
+describe("isResumeReplayChunk", () => {
+  it("counts only non-empty rendered chunks as replay activity", () => {
+    expect(isResumeReplayChunk("")).toBe(false);
+    expect(isResumeReplayChunk("hello")).toBe(true);
   });
 
   it("keeps a positive hard-cap timeout for wedged resumes", () => {
     expect(PTY_RESUME_LOADING_MAX_MS).toBeGreaterThan(0);
+  });
+
+  it("reveals on a quiet gap well inside the hard cap", () => {
+    expect(PTY_RESUME_QUIET_MS).toBeGreaterThan(0);
+    expect(PTY_RESUME_QUIET_MS).toBeLessThan(PTY_RESUME_LOADING_MAX_MS);
   });
 });
 
@@ -42,12 +48,12 @@ describe("resume hydration gate over the real sanitizer", () => {
       expect(firstFrame.length).toBeGreaterThan(0);
       const firstRendered = sanitizer.next(firstFrame);
       expect(firstRendered).toBe("");
-      expect(shouldFinishResumeHydrationOnChunk(firstRendered)).toBe(false);
+      expect(isResumeReplayChunk(firstRendered)).toBe(false);
 
       // ...so the notice only clears once real replay output arrives.
       const secondRendered = sanitizer.next(VISIBLE);
       expect(secondRendered.length).toBeGreaterThan(0);
-      expect(shouldFinishResumeHydrationOnChunk(secondRendered)).toBe(true);
+      expect(isResumeReplayChunk(secondRendered)).toBe(true);
     },
   );
 });
