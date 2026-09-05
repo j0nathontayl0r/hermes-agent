@@ -40,6 +40,7 @@ import { latchChatActivation } from "@/lib/chat-activation";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import { normalizeSessionTitle } from "@/lib/chat-title";
 import { createPtyCompositionForwarder } from "@/lib/pty-composition";
+import { shouldOpenPty } from "@/lib/pty-connect-gate";
 import { isTerminalFocusReport } from "@/lib/pty-focus";
 import { PtyResumeSanitizer } from "@/lib/pty-resume-sanitizer";
 import {
@@ -370,7 +371,10 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   // Profile-scoped chat: spawn the PTY under the globally selected
   // management profile. Changing it remounts the terminal (key below /
   // effect dep) so the user explicitly starts a fresh scoped session.
-  const { profile: scopedProfile } = useProfileScope();
+  const { profile: scopedProfile, ready: profileReady } = useProfileScope();
+  // The resume id whose latest-descendant lookup below has completed (or
+  // failed). The PTY effect waits for it — see shouldOpenPty.
+  const [resolvedResume, setResolvedResume] = useState<string | null>(null);
   const channel = useMemo(
     () => generateChannelId(`${resumeParam ?? ""}\0${scopedProfile}`),
     [resumeParam, scopedProfile],
@@ -421,16 +425,21 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     api
       .getSessionLatestDescendant(resumeParam, scopedProfile)
       .then((res) => {
-        if (cancelled || !res.session_id || res.session_id === resumeParam) {
+        if (cancelled) return;
+        if (!res.session_id || res.session_id === resumeParam) {
+          setResolvedResume(resumeParam);
           return;
         }
 
+        // Rewriting the URL re-runs this effect for the new id, which then
+        // resolves itself; the PTY stays closed until it does.
         const next = new URLSearchParams(searchParams);
         next.set("resume", res.session_id);
         setSearchParams(next, { replace: true });
       })
       .catch(() => {
         // Best-effort: old servers or missing sessions should not block chat.
+        if (!cancelled) setResolvedResume(resumeParam);
       });
 
     return () => {
@@ -524,7 +533,11 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     // until the chat tab has been activated. Prevents the persistently
     // mounted, hidden ChatPage from opening `/api/pty` on every dashboard
     // page. Sticky, so switching away from /chat keeps the PTY alive.
-    if (!hasActivated) return;
+    if (
+      !shouldOpenPty({ hasActivated, profileReady, resumeParam, resolvedResume })
+    ) {
+      return;
+    }
 
     const host = hostRef.current;
     if (!host) return;
@@ -1619,6 +1632,8 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     };
   }, [
     hasActivated,
+    profileReady,
+    resolvedResume,
     channel,
     clearReconnectTimer,
     resumeParam,

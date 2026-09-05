@@ -102,7 +102,7 @@ vi.mock("@/contexts/usePageHeader", () => ({
   usePageHeader: () => ({ setEnd: vi.fn(), setTitle: vi.fn() }),
 }));
 vi.mock("@/contexts/useProfileScope", () => ({
-  useProfileScope: () => ({ profile: "" }),
+  useProfileScope: () => ({ profile: "", ready: true }),
 }));
 vi.mock("@/themes", () => ({
   useTheme: () => ({ theme: { terminalBackground: "#000000" } }),
