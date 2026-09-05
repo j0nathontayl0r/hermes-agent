@@ -9,6 +9,11 @@ export interface ProfileContextValue {
   /** Known profile names (includes "default"). */
   profiles: string[];
   setProfile: (name: string) => void;
+  /** False until the provider has aligned `profile` with the sticky active
+   *  profile on load (or given up). Consumers that spawn per-profile
+   *  processes wait for it so they don't spawn once for "" and again for
+   *  the settled value. */
+  ready: boolean;
 }
 
 export const ProfileContext = createContext<ProfileContextValue>({
@@ -16,4 +21,5 @@ export const ProfileContext = createContext<ProfileContextValue>({
   currentProfile: "default",
   profiles: [],
   setProfile: () => {},
+  ready: true,
 });

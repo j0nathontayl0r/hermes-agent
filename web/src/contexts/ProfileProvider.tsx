@@ -38,6 +38,7 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
   const { pathname } = useLocation();
   const [profiles, setProfiles] = useState<string[]>([]);
   const [currentProfile, setCurrentProfile] = useState("default");
+  const [ready, setReady] = useState(false);
 
   // Initial value comes from the URL (deep link / refresh / unified-launch
   // preselect); afterwards state leads and the URL follows.
@@ -101,7 +102,10 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
           setProfileState(active);
         }
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setReady(true);
+      });
 
     return () => {
       cancelled = true;
@@ -127,8 +131,8 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
   );
 
   const value = useMemo(
-    () => ({ profile, currentProfile, profiles, setProfile }),
-    [profile, currentProfile, profiles, setProfile],
+    () => ({ profile, currentProfile, profiles, setProfile, ready }),
+    [profile, currentProfile, profiles, setProfile, ready],
   );
 
   return (
