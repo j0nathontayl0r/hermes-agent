@@ -16,9 +16,9 @@ export interface ResumeLoadingOverlayInput {
 }
 
 /**
- * Show a wait notice only while a resumed chat is still blank. Once the
- * first real PTY payload arrives the terminal has something to show, so
- * the notice hides and history can stream in underneath.
+ * Show a wait notice while a resumed chat is replaying. It clears once the
+ * replay has been quiet for PTY_RESUME_QUIET_MS (or at the hard cap), so
+ * the terminal is revealed already scrolled to the latest output.
  *
  * Reconnect / ended / closed states keep their own overlays and must not
  * stack this one on top.
@@ -41,7 +41,17 @@ export function shouldShowResumeLoadingOverlay({
   return ptyState === "connecting" || ptyState === "open";
 }
 
-/** First non-empty PTY chunk means the blank window is over. */
-export function shouldFinishResumeHydrationOnChunk(chunkText: string): boolean {
+/**
+ * How long the resume replay must go quiet before the wait notice clears
+ * and the terminal is revealed. The TUI replays a resumed transcript from
+ * the top and xterm follows it down; revealing on the first byte showed
+ * that whole scroll on every chat switch. Token streams pause for less
+ * than this, so a session resumed mid-turn falls back to the hard cap.
+ */
+// ponytail: fixed quiet gap; a replay-complete marker from the TUI would be exact
+export const PTY_RESUME_QUIET_MS = 500;
+
+/** A non-empty rendered PTY chunk counts as replay activity. */
+export function isResumeReplayChunk(chunkText: string): boolean {
   return chunkText.length > 0;
 }

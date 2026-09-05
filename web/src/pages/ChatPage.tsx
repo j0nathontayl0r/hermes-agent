@@ -57,7 +57,8 @@ import {
 import {
   PTY_RESUME_LOADING_MAX_MS,
   PTY_RESUME_LOADING_MESSAGE,
-  shouldFinishResumeHydrationOnChunk,
+  PTY_RESUME_QUIET_MS,
+  isResumeReplayChunk,
   shouldShowResumeLoadingOverlay,
 } from "@/lib/pty-resume-loading";
 import {
@@ -1085,10 +1086,15 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         eraseSuppressionTimer = null;
       }
     };
+    let resumeQuietTimer: ReturnType<typeof setTimeout> | null = null;
     const clearResumeLoadingTimers = () => {
       if (resumeMaxTimer) {
         clearTimeout(resumeMaxTimer);
         resumeMaxTimer = null;
+      }
+      if (resumeQuietTimer) {
+        clearTimeout(resumeQuietTimer);
+        resumeQuietTimer = null;
       }
     };
     const finishResumeHydration = () => {
@@ -1101,8 +1107,11 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       if (!effectiveResume || unmounting) {
         return;
       }
-      if (shouldFinishResumeHydrationOnChunk(chunkText)) {
-        finishResumeHydration();
+      // Each replay chunk pushes the reveal out; it fires once the replay
+      // has paused for PTY_RESUME_QUIET_MS. The hard cap stays armed.
+      if (isResumeReplayChunk(chunkText)) {
+        if (resumeQuietTimer) clearTimeout(resumeQuietTimer);
+        resumeQuietTimer = setTimeout(finishResumeHydration, PTY_RESUME_QUIET_MS);
       }
     };
     if (resumeParam) {
@@ -1850,9 +1859,12 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
             boxShadow: "0 8px 32px rgba(0, 0, 0, 0.4)",
           }}
         >
+          {/* Transparent (not display:none — fit() needs the box) while the
+              resume replay runs underneath, so the user sees the notice and
+              then the transcript already at its end, not the scroll. */}
           <div
             ref={hostRef}
-            className="hermes-chat-xterm-host min-h-0 min-w-0 flex-1"
+            className={`hermes-chat-xterm-host min-h-0 min-w-0 flex-1${showResumeLoadingOverlay ? " opacity-0" : ""}`}
           />
 
           {showReconnectOverlay && (
