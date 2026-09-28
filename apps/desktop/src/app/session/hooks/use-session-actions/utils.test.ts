@@ -1550,6 +1550,37 @@ describe('preserveLocalPendingTurnMessages', () => {
 })
 
 describe('appendLiveSessionProjection', () => {
+  it('hydrates client identity and authored time from live send envelopes', () => {
+    const inflight = appendLiveSessionProjection([], {
+      session_id: 'runtime-live',
+      inflight: {
+        user: 'live prompt',
+        assistant: '',
+        streaming: true,
+        client_message_id: 'client-live',
+        user_timestamp: 1_790_594_548.125
+      }
+    })
+
+    const queued = appendLiveSessionProjection([], {
+      session_id: 'runtime-queued',
+      queued: {
+        user: 'queued prompt',
+        client_message_id: 'client-queued',
+        user_timestamp: 1_790_594_549.25
+      }
+    })
+
+    expect(inflight.find(message => message.role === 'user')).toMatchObject({
+      clientMessageId: 'client-live',
+      timestamp: 1_790_594_548.125
+    })
+    expect(queued.find(message => message.role === 'user')).toMatchObject({
+      clientMessageId: 'client-queued',
+      timestamp: 1_790_594_549.25
+    })
+  })
+
   it('uses client identity before repeated prose for an ordinary in-flight user row', () => {
     const stored = [
       { ...msg('stored-user', 'user', 'same repeated prompt'), clientMessageId: 'client-old', rowId: 10 }

@@ -1163,6 +1163,10 @@ export function appendLiveSessionProjection(messages: ChatMessage[], projection:
   }
 
   const inflightClientMessageId = (() => {
+    if (projection.inflight?.client_message_id) {
+      return projection.inflight.client_message_id
+    }
+
     let metadata: unknown = projection.inflight?.display_metadata
 
     if (typeof metadata === 'string') {
@@ -1208,7 +1212,16 @@ export function appendLiveSessionProjection(messages: ChatMessage[], projection:
       }
     ])
 
-    projected.push(...typed.map(message => ({ ...message, id: `user-inflight-${sessionId}` })))
+    projected.push(
+      ...typed.map(message => ({
+        ...message,
+        id: `user-inflight-${sessionId}`,
+        ...(inflightClientMessageId ? { clientMessageId: inflightClientMessageId } : {}),
+        ...(projection.inflight?.user_timestamp !== undefined
+          ? { timestamp: projection.inflight.user_timestamp }
+          : {})
+      }))
+    )
   }
 
   // Keep a pending assistant boundary even before the first delta when a
@@ -1386,7 +1399,9 @@ export function appendLiveSessionProjection(messages: ChatMessage[], projection:
     projected.push({
       id: `user-queued-${sessionId}`,
       role: 'user',
-      parts: [textPart(queuedUser)]
+      parts: [textPart(queuedUser)],
+      ...(projection.queued?.client_message_id ? { clientMessageId: projection.queued.client_message_id } : {}),
+      ...(projection.queued?.user_timestamp !== undefined ? { timestamp: projection.queued.user_timestamp } : {})
     })
   }
 

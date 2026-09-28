@@ -105,6 +105,85 @@ def test_busy_accept_writes_the_queued_user_row_immediately(monkeypatch, tmp_pat
         db.close()
 
 
+def test_inflight_snapshot_carries_client_send_envelope():
+    session = {"inflight_turn": {
+        "user": "resume me",
+        "assistant": "working",
+        "streaming": True,
+        "client_message_id": "client-live",
+        "user_timestamp": 1_790_594_548.125,
+    }}
+
+    assert server._inflight_snapshot(session) == {
+        "user": "resume me",
+        "assistant": "working",
+        "streaming": True,
+        "client_message_id": "client-live",
+        "user_timestamp": 1_790_594_548.125,
+    }
+
+
+def test_queued_snapshot_carries_client_send_envelope():
+    session = {"queued_prompt": {
+        "text": "run next",
+        "client_message_id": "client-queued",
+        "user_timestamp": 1_790_594_548.125,
+    }}
+
+    assert server._queued_prompt_snapshot(session) == {
+        "user": "run next",
+        "client_message_id": "client-queued",
+        "user_timestamp": 1_790_594_548.125,
+    }
+
+
+def test_identity_bearing_repeat_of_inflight_prose_is_enqueued():
+    session = {
+        "inflight_turn": {
+            "user": "same repeated prompt",
+            "display_metadata": {"client_message_id": "client-old"},
+        }
+    }
+
+    envelope = server._enqueue_prompt(
+        session, "same repeated prompt", "ws-1", client_message_id="client-new")
+
+    assert envelope is session["queued_prompt"]
+    assert envelope["client_message_id"] == "client-new"
+
+
+def test_identity_bearing_repeat_survives_queue_sanitization():
+    entry = {"text": "same repeated prompt", "client_message_id": "client-new"}
+
+    assert server._sanitize_queued_entry_vs_inflight_user(
+        entry, "same repeated prompt") is entry
+
+
+def test_retried_queued_client_message_id_returns_original_ack_without_duplicate(monkeypatch, tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    sid, key = _desktop_session(monkeypatch, db)
+    session = server._sessions[sid]
+    _busy(session)
+    request = {"id": "first", "method": "prompt.submit", "params": {
+        "session_id": sid,
+        "text": "queued idempotency probe",
+        "queued": True,
+        "submitted_at": 1_790_594_548.125,
+        "client_message_id": "desktop-queued-idempotent",
+    }}
+    try:
+        first = server.handle_request(request)
+        retry = server.handle_request({**request, "id": "retry"})
+
+        assert retry["result"] == first["result"]
+        assert session["queued_prompt"]["client_message_id"] == "desktop-queued-idempotent"
+        assert not session.get("queued_prompts")
+        assert len(db.get_messages_as_conversation(key, include_row_ids=True)) == 1
+    finally:
+        server._sessions.pop(sid, None)
+        db.close()
+
+
 def test_identity_bearing_busy_prompts_stay_separate_and_keep_their_envelopes(monkeypatch, tmp_path):
     db = SessionDB(db_path=tmp_path / "state.db")
     sid, key = _desktop_session(monkeypatch, db)

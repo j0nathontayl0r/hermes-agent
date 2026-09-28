@@ -159,7 +159,8 @@ def _enqueue_prompt(session: dict, text: Any, transport: Any, image_paths: list[
     _drop_queued_duplicates_of_inflight_user(session)
     text_only = not image_paths and isinstance(text, str)
     # A text-only self-copy of the live prompt would restart it on drain; an authored copy is another sender's message.
-    if text_only and not turn_author and text.strip() == _ac_inflight_original(session) != "":
+    if (text_only and not turn_author and not client_message_id
+            and text.strip() == _ac_inflight_original(session) != ""):
         return None
     queued = {
         "text": text, "transport": transport,
@@ -196,7 +197,8 @@ def _sanitize_queued_entry_vs_inflight_user(entry: Any, original: str) -> dict |
     if not isinstance(entry, dict):
         return None
     text = entry.get("text")
-    if not original or entry.get("image_paths") or entry.get("turn_author") or not isinstance(text, str):
+    if (not original or entry.get("client_message_id") or entry.get("image_paths")
+            or entry.get("turn_author") or not isinstance(text, str)):
         return entry
     # A lossless text-merge may have glued the live original onto a later follow-up: keep the remainder.
     rest = next((text[len(original + sep):] for sep in ("\n\n", "\n") if text.startswith(original + sep)), text).strip()
@@ -327,9 +329,12 @@ def _persist_queued_user_row(session: dict, envelope: dict, display_kind: str | 
                     return
             staged["content"] = envelope["text"]
         return
+    persist_metadata = dict(envelope.get("display_metadata") or {})
+    if envelope.get("client_message_id"):
+        persist_metadata["_prompt_submit_status"] = "queued"
     staged = _write_submit_user_row(
         session, envelope.get("text"), display_kind,
-        display_metadata=envelope.get("display_metadata"),
+        display_metadata=persist_metadata or None,
         user_timestamp=envelope.get("user_timestamp"))
     if staged is not None:
         envelope["_submit_user_row"] = staged
@@ -420,6 +425,15 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any,
         # backend restart cannot lose it. Lives on the envelope, never the shared session slot.
         if envelope is not None:
             _persist_queued_user_row(session, envelope, display_kind)
+            staged = envelope.get("_submit_user_row") or {}
+            ack = {"status": "queued"}
+            if isinstance(staged.get("_row_id"), int):
+                ack["user_row_id"] = staged["_row_id"]
+            if envelope.get("user_timestamp") is not None:
+                ack["user_timestamp"] = envelope["user_timestamp"]
+            if envelope.get("client_message_id"):
+                ack["client_message_id"] = envelope["client_message_id"]
+            envelope["_submit_ack"] = ack
         session["last_active"] = time.time()
     # Attachments need their own model invocation: queue without cancelling so the user gets both results in order.
     # ``steer`` must NEVER escalate to a hard interrupt: it would kill the live turn AND drop ``AIAgent._pending_steer``
@@ -430,15 +444,7 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any,
     # pending steer buffer — silently destroying the earlier messages of the burst. See #86134.
     if mode == "interrupt" and not image_paths:
         _interrupt_busy_session(sid, session, agent)
-    result = {"status": "queued"}
-    if envelope is not None:
-        staged = envelope.get("_submit_user_row") or {}
-        if isinstance(staged.get("_row_id"), int):
-            result["user_row_id"] = staged["_row_id"]
-        if envelope.get("user_timestamp") is not None:
-            result["user_timestamp"] = envelope["user_timestamp"]
-        if envelope.get("client_message_id"):
-            result["client_message_id"] = envelope["client_message_id"]
+    result = dict(envelope.get("_submit_ack") or {"status": "queued"}) if envelope is not None else {"status": "queued"}
     return _ok(rid, result)
 
 
@@ -475,6 +481,8 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
         kwargs["display_metadata"] = queued["display_metadata"]
     if isinstance(queued.get("user_timestamp"), (int, float)):
         kwargs["user_timestamp"] = queued["user_timestamp"]
+    if isinstance(queued.get("client_message_id"), str) and queued["client_message_id"]:
+        kwargs["client_message_id"] = queued["client_message_id"]
     # Re-place the accept-time rows (if any) at the transcript END before the turn's rows follow
     # them, and slot the dispatching envelope's fresh row for adoption. EVERY queued envelope is
     # re-placed in acceptance order: a later-accepted prompt's row must never sit behind while an
@@ -526,6 +534,10 @@ def _inflight_snapshot(session: dict) -> dict | None:
     if not (user or assistant or streaming or error):
         return None
     snapshot = {"assistant": assistant, "streaming": streaming, "user": user}
+    if isinstance(client_message_id := turn.get("client_message_id"), str) and client_message_id:
+        snapshot["client_message_id"] = client_message_id
+    if isinstance(user_timestamp := turn.get("user_timestamp"), (int, float)):
+        snapshot["user_timestamp"] = float(user_timestamp)
     if isinstance(display_kind := turn.get("display_kind"), str) and display_kind:
         snapshot["display_kind"] = display_kind
     if isinstance(display_metadata := turn.get("display_metadata"), dict):
@@ -594,7 +606,15 @@ def _queued_prompt_snapshot(session: dict) -> dict | None:
     reconnect while it is still queued)."""
     queued = session.get("queued_prompt")
     user = _inflight_text(queued.get("text")) if isinstance(queued, dict) else ""
-    return {"user": user} if user else None
+    if not user or not isinstance(queued, dict):
+        return None
+    snapshot = {"user": user}
+    client_message_id = queued.get("client_message_id")
+    if isinstance(client_message_id, str) and client_message_id:
+        snapshot["client_message_id"] = client_message_id
+        if isinstance(user_timestamp := queued.get("user_timestamp"), (int, float)):
+            snapshot["user_timestamp"] = float(user_timestamp)
+    return snapshot
 
 
 def register(server) -> None:

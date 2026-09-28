@@ -82,6 +82,50 @@ def test_submit_ack_binds_the_written_row_even_if_worker_consumes_staging(monkey
         db.close()
 
 
+def test_retried_idle_client_message_id_returns_original_ack_from_live_and_durable_state(
+    monkeypatch, tmp_path
+):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    sid, key = _desktop_session(monkeypatch, db)
+    session = server._sessions[sid]
+
+    class DeferredThread:
+        def __init__(self, target, **kwargs):
+            self.target = target
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(server.threading, "Thread", DeferredThread)
+    monkeypatch.setattr(server, "_start_agent_build", lambda *args: None)
+    monkeypatch.setattr(server, "_restart_completed_failed_agent_build", lambda *args: False)
+    monkeypatch.setattr(server.time, "time", lambda: 1_790_594_550.0)
+    request = {"id": "p", "method": "prompt.submit", "params": {
+        "session_id": sid,
+        "text": "idempotency probe",
+        "submitted_at": 1_790_594_548.125,
+        "client_message_id": "desktop-message-idempotent",
+    }}
+    try:
+        first = server.handle_request(request)
+        live_retry = server.handle_request({**request, "id": "live-retry"})
+
+        assert live_retry["result"] == first["result"]
+        assert not session.get("queued_prompt")
+        assert len(db.get_messages_as_conversation(key, include_row_ids=True)) == 1
+
+        with session["history_lock"]:
+            session["running"] = False
+            server._clear_inflight_turn(session)
+        durable_retry = server.handle_request({**request, "id": "durable-retry"})
+
+        assert durable_retry["result"] == first["result"]
+        assert len(db.get_messages_as_conversation(key, include_row_ids=True)) == 1
+    finally:
+        server._sessions.pop(sid, None)
+        db.close()
+
+
 def test_submit_uses_valid_client_timestamp_and_persists_client_identity(monkeypatch, tmp_path):
     db = SessionDB(db_path=tmp_path / "state.db")
     sid, key = _desktop_session(monkeypatch, db)
@@ -115,6 +159,18 @@ def test_submit_uses_valid_client_timestamp_and_persists_client_identity(monkeyp
     finally:
         server._sessions.pop(sid, None)
         db.close()
+
+
+@pytest.mark.parametrize(
+    "client_message_id",
+    ["a" * 129, "contains space", "line\nbreak", "ümlaut"],
+)
+def test_invalid_client_message_id_is_ignored_without_rejecting_the_prompt(client_message_id):
+    received_at = 1_790_000_000.0
+
+    assert server._prompt_send_envelope(
+        {"submitted_at": received_at, "client_message_id": client_message_id}, received_at
+    ) == (received_at, None)
 
 
 @pytest.mark.parametrize(

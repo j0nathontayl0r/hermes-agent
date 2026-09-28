@@ -126,6 +126,7 @@ def test_turn_start_forwards_user_send_envelope_to_gateway(turn_env, monkeypatch
 
     def run_prompt_submit(_request_id, _sid, _session, _text, **kwargs):
         captured.update(kwargs)
+        captured["inflight"] = dict(session["inflight_turn"])
         with session["history_lock"]:
             session["running"] = False
             server._clear_inflight_turn(session)
@@ -138,6 +139,7 @@ def test_turn_start_forwards_user_send_envelope_to_gateway(turn_env, monkeypatch
             "request_id": "turn-envelope",
             "prompt": "hello",
             "display_metadata": {"client_message_id": "client-host"},
+            "client_message_id": "client-host",
             "user_timestamp": 1_790_594_548.125,
         })
         _wait(out, lambda frame: frame["type"] == "turn.end")
@@ -147,6 +149,8 @@ def test_turn_start_forwards_user_send_envelope_to_gateway(turn_env, monkeypatch
 
     assert captured["display_metadata"] == {"client_message_id": "client-host"}
     assert captured["user_timestamp"] == 1_790_594_548.125
+    assert captured["inflight"]["client_message_id"] == "client-host"
+    assert captured["inflight"]["user_timestamp"] == 1_790_594_548.125
 
 
 def test_turn_start_without_sid_is_a_turn_error(turn_env):

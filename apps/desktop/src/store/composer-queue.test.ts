@@ -130,6 +130,51 @@ describe('composer queue store', () => {
     expect(getQueuedPrompts('rt-new')[0]?.envelope).toBe(envelope)
   })
 
+  it('migrates legacy persisted entries with queuedAt as authored time and saves the envelope', async () => {
+    const queuedAt = 1_790_594_548_125
+    window.localStorage.setItem(
+      QUEUE_STORAGE_KEY,
+      JSON.stringify({
+        'legacy-session': [{ id: 'legacy-q', text: 'legacy queue', attachments: [], queuedAt }]
+      })
+    )
+    vi.resetModules()
+
+    const reloaded = await import('./composer-queue')
+    const migrated = reloaded.getQueuedPrompts('legacy-session')[0]
+
+    const persisted = JSON.parse(window.localStorage.getItem(QUEUE_STORAGE_KEY)!) as Record<
+      string,
+      Array<{ envelope?: { clientMessageId: string; submittedAt: number } }>
+    >
+
+    expect(migrated?.envelope).toEqual({
+      clientMessageId: expect.any(String),
+      submittedAt: queuedAt / 1000
+    })
+    expect(persisted['legacy-session']?.[0]?.envelope).toEqual(migrated?.envelope)
+  })
+
+  it('migrates legacy in-memory entries before drain and persists the remaining queue', () => {
+    const entries = [
+      { id: 'legacy-head', text: 'first', attachments: [], queuedAt: 1_790_594_548_125 },
+      { id: 'legacy-next', text: 'second', attachments: [], queuedAt: 1_790_594_549_250 }
+    ]
+
+    $queuedPromptsBySession.set({ 'legacy-drain': entries })
+    window.localStorage.setItem(QUEUE_STORAGE_KEY, JSON.stringify({ 'legacy-drain': entries }))
+
+    const drained = dequeueQueuedPrompt('legacy-drain')
+
+    const persisted = JSON.parse(window.localStorage.getItem(QUEUE_STORAGE_KEY)!) as Record<
+      string,
+      Array<{ envelope?: { clientMessageId: string; submittedAt: number } }>
+    >
+
+    expect(drained?.envelope).toMatchObject({ submittedAt: entries[0].queuedAt / 1000 })
+    expect(persisted['legacy-drain']?.[0]?.envelope).toMatchObject({ submittedAt: entries[1].queuedAt / 1000 })
+  })
+
   it('queues prompts in FIFO order', () => {
     enqueueQueuedPrompt(SESSION_KEY, { attachments: [], text: 'first' })
     enqueueQueuedPrompt(SESSION_KEY, { attachments: [], text: 'second' })

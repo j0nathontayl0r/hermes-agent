@@ -3038,6 +3038,8 @@ export interface InflightTurn {
   assistant?: string
   streaming?: boolean
   user?: string
+  client_message_id?: string | null
+  user_timestamp?: number | null
   display_kind?: string | null
   display_metadata?: Record<string, unknown> | null
   corrections?: string[] | null
@@ -3049,6 +3051,8 @@ export interface InflightTurn {
 }
 export interface QueuedPrompt {
   user: string
+  client_message_id?: string | null
+  user_timestamp?: number | null
 }
 /** One unanswered server→client request (``server_requests.Request.snapshot``); the reconnecting client re-delivers it to its request handlers. */
 export interface OpenRequestEntry {

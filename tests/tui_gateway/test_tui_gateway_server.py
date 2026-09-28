@@ -4701,11 +4701,12 @@ def test_compute_host_turn_frame_carries_the_session_login(monkeypatch):
     frame = server._compute_host_turn_frame(
         "rid", "sid-host", record, "hello",
         display_metadata={"client_message_id": "client-host"},
-        user_timestamp=1_790_594_548.125)
+        user_timestamp=1_790_594_548.125, client_message_id="client-host")
 
     assert frame["auth_user_id"] == "basic:alice"
     assert frame["display_metadata"] == {"client_message_id": "client-host"}
     assert frame["user_timestamp"] == 1_790_594_548.125
+    assert frame["client_message_id"] == "client-host"
 
 
 def test_attaching_a_different_login_keeps_the_creator_and_warns_once(monkeypatch):

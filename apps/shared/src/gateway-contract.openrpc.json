@@ -16116,6 +16116,30 @@
             "title": "User",
             "type": "string"
           },
+          "client_message_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Client Message Id"
+          },
+          "user_timestamp": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "User Timestamp"
+          },
           "display_kind": {
             "anyOf": [
               {
@@ -26351,6 +26375,30 @@
           "user": {
             "title": "User",
             "type": "string"
+          },
+          "client_message_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Client Message Id"
+          },
+          "user_timestamp": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "User Timestamp"
           }
         },
         "required": [
