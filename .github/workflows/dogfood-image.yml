@@ -1,0 +1,118 @@
+name: Build timestamp-identity dogfood image
+
+on:
+  push:
+    branches:
+      - dogfood/timestamp-identity-image
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: timestamp-identity-dogfood-image
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/hermes-agent
+
+jobs:
+  build-publish-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out image-builder branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Resolve exact source commit
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="$(tr -d '[:space:]' < .github/dogfood-source-sha)"
+          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::.github/dogfood-source-sha must contain one full commit SHA"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "short=${sha:0:12}" >> "$GITHUB_OUTPUT"
+
+      - name: Check out source commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ steps.source.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Write immutable image provenance
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          python3 scripts/write_install_stamp.py \
+            --output install-stamp.json \
+            --distribution docker \
+            --update-mechanism external \
+            --source ci \
+            --commit "$SOURCE_SHA"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and publish linux/amd64 image
+        id: image
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:dogfood-timestamp-identity
+            ${{ env.IMAGE_NAME }}:dogfood-${{ steps.source.outputs.short }}
+          labels: |
+            org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha,scope=timestamp-identity-dogfood-amd64
+          cache-to: type=gha,mode=max,scope=timestamp-identity-dogfood-amd64
+
+      - name: Pull and smoke-test the published digest
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          ref="${IMAGE_NAME}@${DIGEST}"
+          docker pull "$ref"
+          docker run --rm --entrypoint python -e EXPECTED_SHA="$SOURCE_SHA" "$ref" -c '
+          import json, os
+          from pathlib import Path
+          from tui_gateway.contracts.prompt_voice import PromptSubmitParams, PromptSubmitResult
+          stamp = json.loads(Path("/opt/hermes/install-stamp.json").read_text())
+          assert stamp["commit"] == os.environ["EXPECTED_SHA"], stamp
+          assert {"submitted_at", "client_message_id"} <= set(PromptSubmitParams.model_fields)
+          assert {"user_timestamp", "client_message_id", "user_row_id"} <= set(PromptSubmitResult.model_fields)
+          print("dogfood image smoke test passed")
+          '
+
+      - name: Publish deployment receipt
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          SHORT_SHA: ${{ steps.source.outputs.short }}
+        run: |
+          {
+            echo "## Timestamp identity dogfood image"
+            echo
+            echo "- Source commit: \`$SOURCE_SHA\`"
+            echo "- Immutable image: \`${IMAGE_NAME}@${DIGEST}\`"
+            echo "- Immutable tag: \`${IMAGE_NAME}:dogfood-${SHORT_SHA}\`"
+            echo "- Rolling tag: \`${IMAGE_NAME}:dogfood-timestamp-identity\`"
+            echo
+            echo "Deploy by digest; use the rolling tag only for convenience."
+          } >> "$GITHUB_STEP_SUMMARY"
