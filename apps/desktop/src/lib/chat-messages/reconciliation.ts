@@ -345,10 +345,7 @@ function hydratedIdResolver(mergedNextMessages: ChatMessage[]): (message: ChatMe
       ? hydratedByClientMessageId.get(message.clientMessageId)
       : undefined
 
-    if (
-      !clientMatch ||
-      (message.rowId !== undefined && clientMatch.rowId !== undefined && message.rowId !== clientMatch.rowId)
-    ) {
+    if (!clientMatch) {
       return undefined
     }
 

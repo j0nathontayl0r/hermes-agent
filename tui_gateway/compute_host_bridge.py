@@ -51,7 +51,7 @@ def _compute_host_turn_frame(
     rid: str, sid: str, session: dict, text: Any, image_paths: list[str] | None = None,
     queued_prompt_generation: int | None = None, display_kind: str | None = None,
     display_metadata: dict | None = None, user_timestamp: float | None = None,
-    client_message_id: str | None = None) -> dict:
+    client_message_id: str | None = None, submit_ack: dict | None = None) -> dict:
     with session["history_lock"]:
         history = list(session.get("history", []))
         history_version = int(session.get("history_version", 0))
@@ -63,6 +63,7 @@ def _compute_host_turn_frame(
         **({"display_metadata": display_metadata} if display_metadata else {}),
         **({"user_timestamp": user_timestamp} if user_timestamp is not None else {}),
         **({"client_message_id": client_message_id} if client_message_id else {}),
+        **({"submit_ack": dict(submit_ack)} if isinstance(submit_ack, dict) else {}),
         "history_version": history_version, "cols": int(session.get("cols", 80) or 80),
         "cwd": _session_cwd(session),
         "context_cwd_is_launch_artifact": _context_cwd_is_launch_artifact(session),
@@ -272,12 +273,13 @@ def _submit_prompt_to_compute_host(
     rid: str, sid: str, session: dict, text: Any, image_paths: list[str] | None = None,
     queued_prompt_generation: int | None = None, display_kind: str | None = None,
     display_metadata: dict | None = None, user_timestamp: float | None = None,
-    client_message_id: str | None = None) -> dict:
+    client_message_id: str | None = None, submit_ack: dict | None = None) -> dict:
     cfg = _load_dashboard_process_isolation_config()
     frame = _compute_host_turn_frame(rid, sid, session, text, image_paths=image_paths,
                                      queued_prompt_generation=queued_prompt_generation,
                                      display_kind=display_kind, display_metadata=display_metadata,
-                                     user_timestamp=user_timestamp, client_message_id=client_message_id)
+                                     user_timestamp=user_timestamp, client_message_id=client_message_id,
+                                     submit_ack=submit_ack)
     # Caller JSON-RPC ids may repeat across sockets and turns. Use an opaque
     # dispatch lifetime token, installed before a fast child can send activity.
     turn_id = frame["turn_id"] = frame["request_id"] = uuid.uuid4().hex

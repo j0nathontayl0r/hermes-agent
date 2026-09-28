@@ -540,10 +540,10 @@ function attachmentSignature(message: ChatMessage): string {
 
 function userMessagesMatch(left: ChatMessage, right: ChatMessage): boolean {
   const identityMatches =
-    left.rowId !== undefined && right.rowId !== undefined
-      ? left.rowId === right.rowId
-      : left.clientMessageId && right.clientMessageId
-        ? left.clientMessageId === right.clientMessageId
+    left.clientMessageId && right.clientMessageId
+      ? left.clientMessageId === right.clientMessageId
+      : left.rowId !== undefined && right.rowId !== undefined
+        ? left.rowId === right.rowId
         : true
 
   return (

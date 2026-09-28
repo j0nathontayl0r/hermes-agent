@@ -224,6 +224,26 @@ it('uses client identity when a durable prompt rewrite leaves the local user row
   expect(merged.map(message => message.id)).toEqual(['stored-user', 'local-failure'])
 })
 
+it('uses client identity across row replacement and rewritten prose', () => {
+  const merged = preserveLocalAssistantErrors(
+    [
+      row('stored-user', 'user', 'rewritten durable prompt', {
+        clientMessageId: 'client-queued-rewrite',
+        rowId: 57
+      })
+    ],
+    [
+      row('queued-accept-user', 'user', 'original queued prompt', {
+        clientMessageId: 'client-queued-rewrite',
+        rowId: 41
+      }),
+      row('local-failure', 'assistant', '', { error: 'upstream timeout' })
+    ]
+  )
+
+  expect(merged.map(message => message.id)).toEqual(['stored-user', 'local-failure'])
+})
+
 it('moves a local error onto the durable row it already represents (#119326)', () => {
   const merged = preserveLocalAssistantErrors(
     [

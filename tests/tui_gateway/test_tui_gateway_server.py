@@ -316,6 +316,86 @@ def test_prompt_submit_dispatches_to_compute_host_when_turn_isolation_enabled(mo
         server._sessions.pop("iso-sid", None)
 
 
+def test_fast_compute_host_completion_keeps_exact_ack_for_concurrent_retry(monkeypatch):
+    callback_done = threading.Event()
+    release_submit = threading.Event()
+    retry_waiting = threading.Event()
+
+    class FastSupervisor:
+        def __init__(self):
+            self.calls = 0
+
+        def submit_turn(self, frame, *, on_complete=None):
+            self.calls += 1
+            if self.calls == 1:
+                assert on_complete is not None
+                on_complete({
+                    "type": "turn.end",
+                    "sid": frame["sid"],
+                    "request_id": frame["request_id"],
+                    "history_version": 1,
+                })
+                callback_done.set()
+                assert release_submit.wait(timeout=2)
+
+    supervisor = FastSupervisor()
+    sid = "iso-fast-ack"
+    session = _session(history=[])
+    session["agent"] = None
+    session["agent_ready"] = threading.Event()
+    server._sessions[sid] = session
+    monkeypatch.setattr(server, "_load_cfg", lambda: {"dashboard": {"turn_isolation": True}})
+    monkeypatch.setattr(server, "_get_compute_host_supervisor", lambda _cfg=None: supervisor)
+    monkeypatch.setattr(server, "_ensure_active_session_slot", lambda *_args: None)
+    monkeypatch.setattr(server, "_emit", lambda *_args, **_kwargs: None)
+    real_await = server._await_client_message_ack
+
+    def observe_wait(*args, **kwargs):
+        retry_waiting.set()
+        return real_await(*args, **kwargs)
+
+    monkeypatch.setattr(server, "_await_client_message_ack", observe_wait)
+    request = {
+        "method": "prompt.submit",
+        "params": {
+            "session_id": sid,
+            "text": "finish immediately",
+            "submitted_at": 1_790_594_548.125,
+            "client_message_id": "client-fast-compute-ack",
+        },
+    }
+    replies = {}
+
+    def submit(name):
+        replies[name] = server.handle_request({**request, "id": name})
+
+    first = threading.Thread(target=submit, args=("first",))
+    retry = threading.Thread(target=submit, args=("retry",))
+    try:
+        first.start()
+        assert callback_done.wait(timeout=2)
+        assert session.get("inflight_turn") is None
+        retry.start()
+        assert retry_waiting.wait(timeout=2)
+        release_submit.set()
+        first.join(timeout=2)
+        retry.join(timeout=2)
+
+        assert not first.is_alive() and not retry.is_alive()
+        assert supervisor.calls == 1
+        assert replies["retry"]["result"] == replies["first"]["result"] == {
+            "status": "streaming",
+            "turn_isolation": True,
+            "user_timestamp": 1_790_594_548.125,
+            "client_message_id": "client-fast-compute-ack",
+        }
+    finally:
+        release_submit.set()
+        first.join(timeout=2)
+        retry.join(timeout=2)
+        server._sessions.pop(sid, None)
+
+
 def test_compute_host_explicit_images_do_not_clear_later_attachment(monkeypatch):
     class _Supervisor:
         def submit_turn(self, _frame, *, on_complete=None):

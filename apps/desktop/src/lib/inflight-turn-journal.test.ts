@@ -567,6 +567,20 @@ describe('recoverInFlightTurnJournal', () => {
     expect(result.streamId).toBe('assistant-stream-1')
   })
 
+  it('uses client identity across queued accept-row replacement', () => {
+    const journaled = user('queued-accept-row', 'run after this')
+    journaled.rowId = 41
+    journaled.clientMessageId = 'client-queued-replaced'
+    journalEntry([journaled, assistant('assistant-stream-1', 'partial', { pending: true })])
+
+    const replacement = user('queued-turn-row', 'run after this')
+    replacement.rowId = 57
+    replacement.clientMessageId = 'client-queued-replaced'
+    const result = recoverInFlightTurnJournal('stored-1', [replacement], { keepPending: true })
+
+    expect(result.messages.map(message => message.id)).toEqual(['queued-turn-row', 'assistant-stream-1'])
+  })
+
   it('appends only the assistant tail when the user row was persisted', () => {
     journalEntry([
       user('u1', 'do the thing'),

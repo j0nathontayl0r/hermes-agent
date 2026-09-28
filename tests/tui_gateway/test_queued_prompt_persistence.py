@@ -105,6 +105,37 @@ def test_busy_accept_writes_the_queued_user_row_immediately(monkeypatch, tmp_pat
         db.close()
 
 
+def test_busy_queue_rolls_back_completely_when_accept_time_persistence_raises(monkeypatch, tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    sid, _key = _desktop_session(monkeypatch, db)
+    session = server._sessions[sid]
+    _busy(session)
+    session["attached_images"] = ["/tmp/retry.png"]
+    original_queue = {"text": "already accepted", "transport": "ws-old"}
+    session["queued_prompt"] = original_queue
+    client_message_id = "client-disk-full-retry"
+
+    def disk_full(*_args, **_kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(server, "_persist_queued_user_row", disk_full)
+    try:
+        response = server._handle_busy_submit(
+            "failed", sid, session, "must not run later", "ws-1", queued=True,
+            display_kind=None, user_timestamp=1_790_594_548.125,
+            client_message_id=client_message_id,
+        )
+
+        assert response["error"]["data"]["code"] == "disk_full"
+        assert session.get("queued_prompt") == original_queue
+        assert not session.get("queued_prompts")
+        assert session["attached_images"] == ["/tmp/retry.png"]
+        assert client_message_id not in session.get("_client_message_admissions", {})
+    finally:
+        server._sessions.pop(sid, None)
+        db.close()
+
+
 def test_inflight_snapshot_carries_client_send_envelope():
     session = {"inflight_turn": {
         "user": "resume me",

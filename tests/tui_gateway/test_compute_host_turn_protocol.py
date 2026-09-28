@@ -141,6 +141,12 @@ def test_turn_start_forwards_user_send_envelope_to_gateway(turn_env, monkeypatch
             "display_metadata": {"client_message_id": "client-host"},
             "client_message_id": "client-host",
             "user_timestamp": 1_790_594_548.125,
+            "submit_ack": {
+                "status": "queued",
+                "client_message_id": "client-host",
+                "user_timestamp": 1_790_594_548.125,
+                "user_row_id": 41,
+            },
         })
         _wait(out, lambda frame: frame["type"] == "turn.end")
     finally:
@@ -149,8 +155,15 @@ def test_turn_start_forwards_user_send_envelope_to_gateway(turn_env, monkeypatch
 
     assert captured["display_metadata"] == {"client_message_id": "client-host"}
     assert captured["user_timestamp"] == 1_790_594_548.125
+    assert captured["submit_ack"] == {
+        "status": "queued",
+        "client_message_id": "client-host",
+        "user_timestamp": 1_790_594_548.125,
+        "user_row_id": 41,
+    }
     assert captured["inflight"]["client_message_id"] == "client-host"
     assert captured["inflight"]["user_timestamp"] == 1_790_594_548.125
+    assert captured["inflight"]["_submit_ack"] == captured["submit_ack"]
 
 
 def test_turn_start_without_sid_is_a_turn_error(turn_env):

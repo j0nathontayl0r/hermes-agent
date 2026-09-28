@@ -511,6 +511,8 @@ def _persist_session_row_for_submit(
         set_ready = getattr(ready, "set", None)
         if callable(set_ready):
             set_ready()
+        _release_client_message_admission_locked(
+            session, turn.get("client_message_id") if isinstance(turn, dict) else None)
         session["running"] = False
         session["last_active"] = time.time()
         session.pop("_hosted_room_task", None)
@@ -566,6 +568,15 @@ def _live_client_message_admission_locked(
     """Return the accepted live ack, or its pending completion event. Caller holds history_lock."""
     if not client_message_id:
         return None, None
+    admissions = session.get("_client_message_admissions")
+    admission = admissions.get(client_message_id) if isinstance(admissions, dict) else None
+    if isinstance(admission, dict):
+        ack = admission.get("ack")
+        if isinstance(ack, dict):
+            return dict(ack), None
+        ready = admission.get("ready")
+        if ready is not None:
+            return None, ready
     inflight = session.get("inflight_turn")
     if isinstance(inflight, dict) and inflight.get("client_message_id") == client_message_id:
         ready = inflight.get("_submit_ack_ready")
@@ -581,6 +592,40 @@ def _live_client_message_admission_locked(
                 and isinstance(envelope.get("_submit_ack"), dict)):
             return dict(envelope["_submit_ack"]), None
     return None, None
+
+
+def _reserve_client_message_admission_locked(
+    session: dict, client_message_id: str | None
+) -> object | None:
+    """Claim one client id before work leaves ``history_lock``."""
+    if not client_message_id:
+        return None
+    admissions = session.setdefault("_client_message_admissions", {})
+    ready = threading.Event()
+    admissions[client_message_id] = {"ready": ready}
+    return ready
+
+
+def _release_client_message_admission_locked(session: dict, client_message_id: str | None) -> None:
+    if not client_message_id:
+        return
+    admissions = session.get("_client_message_admissions")
+    admission = admissions.pop(client_message_id, None) if isinstance(admissions, dict) else None
+    ready = admission.get("ready") if isinstance(admission, dict) else None
+    set_ready = getattr(ready, "set", None)
+    if callable(set_ready):
+        set_ready()
+
+
+def _remember_client_message_ack_locked(session: dict, client_message_id: str | None, ack: dict) -> None:
+    if not client_message_id:
+        return
+    admissions = session.setdefault("_client_message_admissions", {})
+    admission = admissions.setdefault(client_message_id, {"ready": threading.Event()})
+    admission["ack"] = dict(ack)
+    set_ready = getattr(admission.get("ready"), "set", None)
+    if callable(set_ready):
+        set_ready()
 
 
 def _lock_in_submit_turn(
@@ -620,7 +665,8 @@ def _lock_in_submit_turn(
             session, text, display_kind=display_kind, display_metadata=display_metadata,
             user_timestamp=user_timestamp, client_message_id=client_message_id)
         if client_message_id:
-            session["inflight_turn"]["_submit_ack_ready"] = threading.Event()
+            session["inflight_turn"]["_submit_ack_ready"] = (
+                _reserve_client_message_admission_locked(session, client_message_id))
     return None, fields
 
 
@@ -663,6 +709,7 @@ def _remember_client_message_ack(session: dict, client_message_id: str | None, a
     if not client_message_id:
         return
     with session["history_lock"]:
+        _remember_client_message_ack_locked(session, client_message_id, ack)
         inflight = session.get("inflight_turn")
         if isinstance(inflight, dict) and inflight.get("client_message_id") == client_message_id:
             inflight["_submit_ack"] = dict(ack)
