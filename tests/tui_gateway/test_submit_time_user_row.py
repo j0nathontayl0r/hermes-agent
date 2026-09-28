@@ -1,6 +1,7 @@
 """prompt.submit writes the user's message at send time, and the turn that follows adopts that row instead of
 writing a second one (#111868: a Desktop freeze during a slow first agent build left a session row with no message)."""
 
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -120,6 +121,97 @@ def test_retried_idle_client_message_id_returns_original_ack_from_live_and_durab
         durable_retry = server.handle_request({**request, "id": "durable-retry"})
 
         assert durable_retry["result"] == first["result"]
+        assert len(db.get_messages_as_conversation(key, include_row_ids=True)) == 1
+    finally:
+        server._sessions.pop(sid, None)
+        db.close()
+
+
+def test_pending_live_ack_never_falls_through_to_partial_durable_reconstruction(monkeypatch, tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    sid, _key = _desktop_session(monkeypatch, db)
+    session = server._sessions[sid]
+    client_message_id = "desktop-pending-exact-ack"
+    try:
+        with session["history_lock"]:
+            session["running"] = True
+            server._start_inflight_turn(
+                session, "pending exact ack", user_timestamp=1_790_594_548.125,
+                client_message_id=client_message_id)
+            session["inflight_turn"]["_submit_ack"] = {
+                "status": "streaming",
+                "client_message_id": client_message_id,
+                "survivor_user_row_ids": [17],
+            }
+            session["inflight_turn"]["_submit_ack_ready"] = threading.Event()
+        assert server._persist_session_row_for_submit(
+            "rid", session, "pending exact ack", None,
+            {"client_message_id": client_message_id}, 1_790_594_548.125,
+        ) is None
+
+        assert server._client_message_ack(session, client_message_id) is None
+    finally:
+        server._sessions.pop(sid, None)
+        db.close()
+
+
+
+def test_concurrent_idle_retries_share_one_admission_and_original_ack(monkeypatch, tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    sid, key = _desktop_session(monkeypatch, db)
+    session = server._sessions[sid]
+
+    class DeferredThread:
+        def __init__(self, target, **kwargs):
+            self.target = target
+
+        def start(self):
+            pass
+
+    rendezvous = threading.Barrier(2)
+    slot_checks = 0
+    slot_checks_lock = threading.Lock()
+
+    def synchronized_slot_check(*_args):
+        nonlocal slot_checks
+        with slot_checks_lock:
+            slot_checks += 1
+        rendezvous.wait(timeout=2)
+        return None
+
+    real_thread = threading.Thread
+    monkeypatch.setattr(server.threading, "Thread", DeferredThread)
+    monkeypatch.setattr(server, "_ensure_active_session_slot", synchronized_slot_check)
+    monkeypatch.setattr(server, "_start_agent_build", lambda *args: None)
+    monkeypatch.setattr(server, "_restart_completed_failed_agent_build", lambda *args: False)
+    monkeypatch.setattr(server.time, "time", lambda: 1_790_594_550.0)
+    request = {"method": "prompt.submit", "params": {
+        "session_id": sid,
+        "text": "one concurrent send",
+        "submitted_at": 1_790_594_548.125,
+        "client_message_id": "desktop-concurrent-idempotent",
+    }}
+    try:
+        replies = {}
+
+        def submit(request_id):
+            replies[request_id] = getattr(server, "handle_request")({**request, "id": request_id})
+
+        callers = [real_thread(target=submit, args=(request_id,)) for request_id in ("first", "retry")]
+        for caller in callers:
+            caller.start()
+        for caller in callers:
+            caller.join(timeout=5)
+        assert not any(caller.is_alive() for caller in callers)
+
+        first, retry = replies["first"], replies["retry"]
+        assert slot_checks == 2  # both requests passed the old pre-admission dedupe together
+        assert first["result"] == retry["result"]
+        assert first["result"]["status"] == "streaming"
+        assert isinstance(first["result"].get("user_row_id"), int)
+        assert session["inflight_turn"]["client_message_id"] == "desktop-concurrent-idempotent"
+        assert not session.get("queued_prompt")
+        assert not session.get("queued_prompts")
         assert len(db.get_messages_as_conversation(key, include_row_ids=True)) == 1
     finally:
         server._sessions.pop(sid, None)

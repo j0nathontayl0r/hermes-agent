@@ -393,12 +393,20 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any,
     # follow-up drains when compression finishes — the Discord-gateway contract.
     if mode in ("steer", "interrupt") and _session_compression_in_flight(session):
         mode = "queue"
+    duplicate_ack = pending_ack = None
     with session["history_lock"]:
         if not session.get("running"):
             return None  # turn ended since prompt.submit's busy check; caller retries on the idle session
-        image_paths = list(session.get("attached_images", []))
-        if image_paths:
-            session["attached_images"] = []  # claim now so a later paste isn't consumed when the turn yields
+        duplicate_ack, pending_ack = _live_client_message_admission_locked(session, client_message_id)
+        image_paths = []
+        if duplicate_ack is None and pending_ack is None:
+            image_paths = list(session.get("attached_images", []))
+            if image_paths:
+                session["attached_images"] = []  # claim now so a later paste isn't consumed when the turn yields
+    if duplicate_ack is not None:
+        return _ok(rid, duplicate_ack)
+    if pending_ack is not None:
+        return _await_client_message_ack(rid, session, client_message_id, pending_ack)
     plain_text = _coerce_message_text(text).strip() if not image_paths and _is_text_only_busy_payload(text) else ""
     # Text-only corrections steer/redirect in place when supported; media payloads and older agents fall through to
     # the proven interrupt + queue path.
@@ -417,24 +425,34 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any,
             if image_paths:
                 session["attached_images"] = image_paths + list(session.get("attached_images", []))
             return None
-        envelope = _enqueue_prompt(
-            session, text, transport, image_paths=image_paths, turn_author=turn_author,
-            display_metadata=display_metadata, user_timestamp=user_timestamp,
-            client_message_id=client_message_id)
-        # Durable AT ACCEPT (not when the turn runs): a cold resume sees the queued message and a
-        # backend restart cannot lose it. Lives on the envelope, never the shared session slot.
-        if envelope is not None:
-            _persist_queued_user_row(session, envelope, display_kind)
-            staged = envelope.get("_submit_user_row") or {}
-            ack = {"status": "queued"}
-            if isinstance(staged.get("_row_id"), int):
-                ack["user_row_id"] = staged["_row_id"]
-            if envelope.get("user_timestamp") is not None:
-                ack["user_timestamp"] = envelope["user_timestamp"]
-            if envelope.get("client_message_id"):
-                ack["client_message_id"] = envelope["client_message_id"]
-            envelope["_submit_ack"] = ack
-        session["last_active"] = time.time()
+        duplicate_ack, pending_ack = _live_client_message_admission_locked(session, client_message_id)
+        if duplicate_ack is not None or pending_ack is not None:
+            if image_paths:
+                session["attached_images"] = image_paths + list(session.get("attached_images", []))
+            envelope = None
+        else:
+            envelope = _enqueue_prompt(
+                session, text, transport, image_paths=image_paths, turn_author=turn_author,
+                display_metadata=display_metadata, user_timestamp=user_timestamp,
+                client_message_id=client_message_id)
+            # Durable AT ACCEPT (not when the turn runs): a cold resume sees the queued message and a
+            # backend restart cannot lose it. Lives on the envelope, never the shared session slot.
+            if envelope is not None:
+                _persist_queued_user_row(session, envelope, display_kind)
+                staged = envelope.get("_submit_user_row") or {}
+                ack = {"status": "queued"}
+                if isinstance(staged.get("_row_id"), int):
+                    ack["user_row_id"] = staged["_row_id"]
+                if envelope.get("user_timestamp") is not None:
+                    ack["user_timestamp"] = envelope["user_timestamp"]
+                if envelope.get("client_message_id"):
+                    ack["client_message_id"] = envelope["client_message_id"]
+                envelope["_submit_ack"] = ack
+            session["last_active"] = time.time()
+    if duplicate_ack is not None:
+        return _ok(rid, duplicate_ack)
+    if pending_ack is not None:
+        return _await_client_message_ack(rid, session, client_message_id, pending_ack)
     # Attachments need their own model invocation: queue without cancelling so the user gets both results in order.
     # ``steer`` must NEVER escalate to a hard interrupt: it would kill the live turn AND drop ``AIAgent._pending_steer``
     # (earlier accepted steers); steer fall-throughs stay FIFO-queued.
@@ -483,6 +501,8 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
         kwargs["user_timestamp"] = queued["user_timestamp"]
     if isinstance(queued.get("client_message_id"), str) and queued["client_message_id"]:
         kwargs["client_message_id"] = queued["client_message_id"]
+    if isinstance(queued.get("_submit_ack"), dict):
+        kwargs["submit_ack"] = dict(queued["_submit_ack"])
     # Re-place the accept-time rows (if any) at the transcript END before the turn's rows follow
     # them, and slot the dispatching envelope's fresh row for adoption. EVERY queued envelope is
     # re-placed in acceptance order: a later-accepted prompt's row must never sit behind while an
@@ -612,8 +632,8 @@ def _queued_prompt_snapshot(session: dict) -> dict | None:
     client_message_id = queued.get("client_message_id")
     if isinstance(client_message_id, str) and client_message_id:
         snapshot["client_message_id"] = client_message_id
-        if isinstance(user_timestamp := queued.get("user_timestamp"), (int, float)):
-            snapshot["user_timestamp"] = float(user_timestamp)
+    if isinstance(user_timestamp := queued.get("user_timestamp"), (int, float)):
+        snapshot["user_timestamp"] = float(user_timestamp)
     return snapshot
 
 

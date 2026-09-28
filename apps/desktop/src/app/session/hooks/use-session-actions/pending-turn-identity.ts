@@ -10,6 +10,14 @@ export function transcriptRowIds(message: ChatMessage): number[] {
 
 /** Unknown identity is not a match, but remains eligible for legacy live projection. */
 export function conflictingTranscriptIdentity(local: ChatMessage, authoritative: ChatMessage): boolean {
+  if (
+    local.clientMessageId &&
+    authoritative.clientMessageId &&
+    local.clientMessageId === authoritative.clientMessageId
+  ) {
+    return false
+  }
+
   const localIds = transcriptRowIds(local)
   const authoritativeIds = transcriptRowIds(authoritative)
 

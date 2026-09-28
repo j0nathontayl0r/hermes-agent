@@ -17465,6 +17465,7 @@ def test_session_activate_returns_inflight_stream_before_completion(monkeypatch)
             "assistant": "partial answer",
             "streaming": True,
             "user": "write a long answer",
+            "user_timestamp": submit["result"]["user_timestamp"],
         }
         turn_started_at = resp["result"]["turn_started_at"]
         assert turn_started_at == server._sessions["sid-live"]["inflight_turn"]["started_at"]

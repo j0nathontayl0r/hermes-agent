@@ -137,6 +137,23 @@ def test_queued_snapshot_carries_client_send_envelope():
     }
 
 
+def test_snapshots_keep_user_timestamp_without_client_identity():
+    inflight_session = {}
+    server._start_inflight_turn(
+        inflight_session, "resume me", user_timestamp=1_790_594_548.125)
+    queued_session = {"queued_prompt": {
+        "text": "run next",
+        "user_timestamp": 1_790_594_549.25,
+    }}
+
+    assert server._inflight_snapshot(inflight_session)["user_timestamp"] == 1_790_594_548.125
+    assert "client_message_id" not in server._inflight_snapshot(inflight_session)
+    assert server._queued_prompt_snapshot(queued_session) == {
+        "user": "run next",
+        "user_timestamp": 1_790_594_549.25,
+    }
+
+
 def test_identity_bearing_repeat_of_inflight_prose_is_enqueued():
     session = {
         "inflight_turn": {
@@ -179,6 +196,43 @@ def test_retried_queued_client_message_id_returns_original_ack_without_duplicate
         assert session["queued_prompt"]["client_message_id"] == "desktop-queued-idempotent"
         assert not session.get("queued_prompts")
         assert len(db.get_messages_as_conversation(key, include_row_ids=True)) == 1
+    finally:
+        server._sessions.pop(sid, None)
+        db.close()
+
+
+def test_drained_queue_retry_keeps_the_original_queued_ack(monkeypatch, tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    sid, _key = _desktop_session(monkeypatch, db)
+    session = server._sessions[sid]
+    _busy(session)
+    try:
+        accepted = server._handle_busy_submit(
+            "accept", sid, session, "queued ack probe", "ws-1", queued=True, display_kind=None,
+            display_metadata={"client_message_id": "client-drained"},
+            user_timestamp=1_790_594_548.125, client_message_id="client-drained",
+        )["result"]
+        assert accepted["status"] == "queued"
+        assert isinstance(accepted.get("user_row_id"), int)
+
+        with session["history_lock"]:
+            session["running"] = False
+            server._clear_inflight_turn(session)
+
+        def begin_drained_turn(_rid, _sid, drained_session, text, **kwargs):
+            server._start_inflight_turn(
+                drained_session, text,
+                user_timestamp=kwargs.get("user_timestamp"),
+                client_message_id=kwargs.get("client_message_id"),
+                submit_ack=kwargs.get("submit_ack"),
+            )
+
+        monkeypatch.setattr(server, "_run_prompt_submit", begin_drained_turn)
+
+        assert server._drain_queued_prompt("drain", sid, session) is True
+        assert session["inflight_turn"]["_submit_ack"] == accepted
+        assert server._client_message_ack(session, "client-drained") == accepted
+        assert accepted["user_row_id"] != session["_submit_user_row"]["_row_id"]
     finally:
         server._sessions.pop(sid, None)
         db.close()

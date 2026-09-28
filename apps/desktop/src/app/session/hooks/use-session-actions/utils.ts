@@ -1484,9 +1484,14 @@ export function dedupeInflightUserAgainstTranscript(
 
   const persistedTail = persistedMessages.slice(suffixStart)
   const lastPersistedMessage = persistedTail[persistedTail.length - 1]
+  const inflightClientMessageId = projection.inflight?.client_message_id
+  const comparableClientIdentity = Boolean(inflightClientMessageId && lastPersistedMessage?.clientMessageId)
 
   const persistedUserPresent =
-    lastPersistedMessage?.role === 'user' && normalizedMessageText(lastPersistedMessage) === inflightUser
+    lastPersistedMessage?.role === 'user' &&
+    (comparableClientIdentity
+      ? lastPersistedMessage.clientMessageId === inflightClientMessageId
+      : normalizedMessageText(lastPersistedMessage) === inflightUser)
 
   if (!persistedUserPresent) {
     return projection

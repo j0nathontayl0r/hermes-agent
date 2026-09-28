@@ -117,7 +117,8 @@ def _admit_prompt_turn(
     sid: str, session: dict, text: Any, image_paths: list[str] | None,
     queued_prompt_generation: int | None, display_kind: str | None,
     display_metadata: dict | None, user_timestamp: float | None = None,
-    client_message_id: str | None = None) -> tuple[list[str], Any] | None:
+    client_message_id: str | None = None, submit_ack: dict | None = None,
+) -> tuple[list[str], Any] | None:
     """Ownership + liveness gate every turn source must cross; ``(images, agent)`` or None.
     Synthesized turns (auto-continue, wake-ups) call ``_run_prompt_submit`` directly — the
     bypass that once let a second backend run a duplicate turn."""
@@ -148,7 +149,8 @@ def _admit_prompt_turn(
         if not isinstance(inflight, dict) or inflight.get("status") == "error":
             _start_inflight_turn(
                 session, text, display_kind=display_kind, display_metadata=display_metadata,
-                user_timestamp=user_timestamp, client_message_id=client_message_id)
+                user_timestamp=user_timestamp, client_message_id=client_message_id,
+                submit_ack=submit_ack)
         agent = session["agent"]
         if agent is None:
             session["running"] = False
@@ -1052,7 +1054,7 @@ def _run_prompt_submit(
     queued_prompt_generation: int | None = None,
     terminal_callback: Callable[[dict[str, Any]], None] | None = None,
     turn_author: dict | None = None, user_timestamp: float | None = None,
-    client_message_id: str | None = None) -> bool:
+    client_message_id: str | None = None, submit_ack: dict | None = None) -> bool:
     # Every dispatch binds the session's own row (session_key, real source) before the turn writes:
     # the synthesized turns that enter here directly (crash auto-continue, queued-prompt drain,
     # wake-ups) bypass prompt.submit's persist, and a row-less turn is otherwise materialized by
@@ -1063,7 +1065,7 @@ def _run_prompt_submit(
             session.get("session_key") or sid)
     admitted = _admit_prompt_turn(
         sid, session, text, image_paths, queued_prompt_generation, display_kind, display_metadata,
-        user_timestamp, client_message_id)
+        user_timestamp, client_message_id, submit_ack)
     if admitted is None:
         return False
     images, agent = admitted

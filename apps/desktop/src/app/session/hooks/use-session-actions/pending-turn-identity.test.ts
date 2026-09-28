@@ -13,12 +13,14 @@ const user = (id: string, clientMessageId: string, rowId?: number): ChatMessage 
 })
 
 describe('pending turn identity', () => {
-  it('matches by row id first, then client message id when row identity is unavailable', () => {
+  it('lets stable client identity bridge a gateway queue-row replacement', () => {
     expect(conflictingTranscriptIdentity(user('local', 'client-a'), user('stored', 'client-a', 11))).toBe(false)
     expect(conflictingTranscriptIdentity(user('local', 'client-a'), user('stored', 'client-b', 11))).toBe(true)
 
     expect(conflictingTranscriptIdentity(user('local', 'client-a', 11), user('stored', 'client-b', 11))).toBe(false)
-    expect(conflictingTranscriptIdentity(user('local', 'client-a', 10), user('stored', 'client-a', 11))).toBe(true)
+    expect(
+      conflictingTranscriptIdentity(user('queued-accept', 'client-a', 10), user('drained-turn', 'client-a', 11))
+    ).toBe(false)
   })
 
   it('finds the acknowledged boundary by client id without sorting timestamps', () => {

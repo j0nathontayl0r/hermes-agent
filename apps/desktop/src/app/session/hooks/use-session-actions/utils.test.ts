@@ -1582,9 +1582,7 @@ describe('appendLiveSessionProjection', () => {
   })
 
   it('uses client identity before repeated prose for an ordinary in-flight user row', () => {
-    const stored = [
-      { ...msg('stored-user', 'user', 'same repeated prompt'), clientMessageId: 'client-old', rowId: 10 }
-    ]
+    const stored = [{ ...msg('stored-user', 'user', 'same repeated prompt'), clientMessageId: 'client-old', rowId: 10 }]
 
     const restored = appendLiveSessionProjection(stored, {
       session_id: 'runtime-1',
@@ -1992,6 +1990,41 @@ describe('dedupeInflightUserAgainstTranscript', () => {
 
     expect(deduped.inflight?.user).toBe('current prompt')
     expect(deduped.inflight?.assistant).toBe('partial answer')
+  })
+
+  it('does not let older equal prose with a different client id hide the live occurrence', () => {
+    const runtime = [
+      msg('runtime-user', 'user', 'earlier prompt', { timestamp: 1 }),
+      msg('runtime-assistant', 'assistant', 'earlier answer', { timestamp: 2 })
+    ]
+
+    const persisted = [
+      ...runtime,
+      msg('persisted-repeat', 'user', 'same repeated prompt', {
+        clientMessageId: 'client-old',
+        rowId: 10,
+        timestamp: 3
+      })
+    ]
+
+    const projection = {
+      ...runningProjection('same repeated prompt'),
+      inflight: {
+        user: 'same repeated prompt',
+        assistant: 'partial answer',
+        streaming: true,
+        client_message_id: 'client-new'
+      }
+    }
+
+    const deduped = dedupeInflightUserAgainstTranscript(persisted, runtime, projection)
+    const restored = appendLiveSessionProjection(persisted, deduped)
+
+    expect(restored.filter(message => message.role === 'user').map(message => message.clientMessageId)).toEqual([
+      undefined,
+      'client-old',
+      'client-new'
+    ])
   })
 
   it('preserves the assistant boundary before a queued turn when the persisted in-flight user has no delta', () => {

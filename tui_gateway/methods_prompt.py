@@ -506,6 +506,11 @@ def _persist_session_row_for_submit(
     # No turn thread will start, so neither resume nor the busy queue may see
     # this rejected prompt as live. Release the slot a turn would normally own.
     with session["history_lock"]:
+        turn = session.get("inflight_turn")
+        ready = turn.get("_submit_ack_ready") if isinstance(turn, dict) else None
+        set_ready = getattr(ready, "set", None)
+        if callable(set_ready):
+            set_ready()
         session["running"] = False
         session["last_active"] = time.time()
         session.pop("_hosted_room_task", None)
@@ -555,15 +560,42 @@ _TRUNCATION_PARAMS = (
     "truncate_before_user_ordinal", "truncate_before_row_id", "truncate_before_message_id")
 
 
+def _live_client_message_admission_locked(
+    session: dict, client_message_id: str | None
+) -> tuple[dict | None, object | None]:
+    """Return the accepted live ack, or its pending completion event. Caller holds history_lock."""
+    if not client_message_id:
+        return None, None
+    inflight = session.get("inflight_turn")
+    if isinstance(inflight, dict) and inflight.get("client_message_id") == client_message_id:
+        ready = inflight.get("_submit_ack_ready")
+        is_set = getattr(ready, "is_set", None)
+        if callable(is_set) and not is_set():
+            return None, ready
+        ack = inflight.get("_submit_ack")
+        return (dict(ack), None) if isinstance(ack, dict) else (None, None)
+    queued = [session["queued_prompt"]] if isinstance(session.get("queued_prompt"), dict) else []
+    queued.extend(e for e in (session.get("queued_prompts") or []) if isinstance(e, dict))
+    for envelope in queued:
+        if (envelope.get("client_message_id") == client_message_id
+                and isinstance(envelope.get("_submit_ack"), dict)):
+            return dict(envelope["_submit_ack"]), None
+    return None, None
+
+
 def _lock_in_submit_turn(
     rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task,
-    display_kind, display_metadata, user_timestamp, client_message_id):
-    """Under ``history_lock``: refuse watch-child races / malformed truncation, apply the
-    cut, mark the turn running + in flight.  Returns ``(err, survivor_fields)``."""
+    display_kind=None, display_metadata=None, user_timestamp=None, client_message_id=None):
+    """Under ``history_lock``: dedupe or claim exactly one turn admission."""
     fields = {}
     with _session_turn_admission(session) as admitted:
         if not admitted:
             return _err(rid, 5035, "backend is retiring; reconnect to continue"), fields
+        duplicate_ack, pending_ack = _live_client_message_admission_locked(session, client_message_id)
+        if duplicate_ack is not None:
+            return _ok(rid, duplicate_ack), fields
+        if pending_ack is not None:
+            return {"_pending_client_message_ack": pending_ack}, fields
         # A watch session's run lives in the PARENT turn (own running flag False); typing
         # mid-run would build a second agent racing the child on the same stored session.
         if session.get("lazy") and _child_run_active(
@@ -587,6 +619,8 @@ def _lock_in_submit_turn(
         _start_inflight_turn(
             session, text, display_kind=display_kind, display_metadata=display_metadata,
             user_timestamp=user_timestamp, client_message_id=client_message_id)
+        if client_message_id:
+            session["inflight_turn"]["_submit_ack_ready"] = threading.Event()
     return None, fields
 
 
@@ -595,17 +629,11 @@ def _client_message_ack(session: dict, client_message_id: str | None) -> dict | 
     if not client_message_id:
         return None
     with session["history_lock"]:
-        inflight = session.get("inflight_turn")
-        if isinstance(inflight, dict) and inflight.get("client_message_id") == client_message_id:
-            ack = inflight.get("_submit_ack")
-            if isinstance(ack, dict):
-                return dict(ack)
-        queued = [session["queued_prompt"]] if isinstance(session.get("queued_prompt"), dict) else []
-        queued.extend(e for e in (session.get("queued_prompts") or []) if isinstance(e, dict))
-        for envelope in queued:
-            if (envelope.get("client_message_id") == client_message_id
-                    and isinstance(envelope.get("_submit_ack"), dict)):
-                return dict(envelope["_submit_ack"])
+        live_ack, pending_ack = _live_client_message_admission_locked(session, client_message_id)
+        if live_ack is not None:
+            return live_ack
+        if pending_ack is not None:
+            return None
     key = str(session.get("session_key") or "")
     if not key:
         return None
@@ -638,6 +666,19 @@ def _remember_client_message_ack(session: dict, client_message_id: str | None, a
         inflight = session.get("inflight_turn")
         if isinstance(inflight, dict) and inflight.get("client_message_id") == client_message_id:
             inflight["_submit_ack"] = dict(ack)
+            ready = inflight.get("_submit_ack_ready")
+            set_ready = getattr(ready, "set", None)
+            if callable(set_ready):
+                set_ready()
+
+
+def _await_client_message_ack(rid, session: dict, client_message_id: str | None, ready: object) -> dict:
+    """Wait outside history_lock for the winning admission to publish its exact ack."""
+    wait = getattr(ready, "wait", None)
+    if callable(wait) and wait(timeout=30.0):
+        if (ack := _client_message_ack(session, client_message_id)) is not None:
+            return _ok(rid, ack)
+    return _err(rid, 4092, "matching prompt admission is still pending; retry")
 
 
 # Per-turn client surfaces that carry a model-bound note (session_notifications._surface_note).
@@ -748,6 +789,8 @@ def _(rid, params: dict) -> dict:
     err, survivor_fields = _lock_in_submit_turn(
         rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task,
         display_kind, display_metadata, user_timestamp, client_message_id)
+    if isinstance(err, dict) and (pending_ack := err.get("_pending_client_message_ack")) is not None:
+        return _await_client_message_ack(rid, session, client_message_id, pending_ack)
     if err is not None:
         return err
     survivor_fields.update(
