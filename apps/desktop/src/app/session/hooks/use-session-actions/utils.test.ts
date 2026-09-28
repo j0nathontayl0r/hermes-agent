@@ -504,6 +504,30 @@ describe('reconcileResumeMessages', () => {
     expect(out.attachmentRefs).toEqual(['@image:/tmp/photo.png'])
   })
 
+  it('matches a windowed repeated user prompt by row id then client id before role ordinal', () => {
+    const previous = [
+      msg('local-old', 'user', 'same prompt', {
+        attachmentRefs: ['@file:old.txt'],
+        clientMessageId: 'client-old'
+      }),
+      msg('local-new', 'user', 'same prompt', {
+        attachmentRefs: ['@file:new.txt'],
+        clientMessageId: 'client-new'
+      })
+    ]
+
+    const next = [
+      msg('stored-new', 'user', 'same prompt', {
+        clientMessageId: 'client-new',
+        rowId: 42
+      })
+    ]
+
+    const [out] = reconcileResumeMessages(next, previous)
+
+    expect(out.attachmentRefs).toEqual(['@file:new.txt'])
+  })
+
   it('does not overwrite attachment refs already present on the resumed message', () => {
     const next = [
       msg('stored-user', 'user', 'describe this image', {
@@ -1526,6 +1550,28 @@ describe('preserveLocalPendingTurnMessages', () => {
 })
 
 describe('appendLiveSessionProjection', () => {
+  it('uses client identity before repeated prose for an ordinary in-flight user row', () => {
+    const stored = [
+      { ...msg('stored-user', 'user', 'same repeated prompt'), clientMessageId: 'client-old', rowId: 10 }
+    ]
+
+    const restored = appendLiveSessionProjection(stored, {
+      session_id: 'runtime-1',
+      inflight: {
+        user: 'same repeated prompt',
+        assistant: '',
+        streaming: true,
+        display_metadata: { client_message_id: 'client-new' }
+      }
+    })
+
+    expect(restored.map(message => [message.role, message.clientMessageId])).toEqual([
+      ['user', 'client-old'],
+      ['user', 'client-new'],
+      ['assistant', undefined]
+    ])
+  })
+
   // A synthetic starting prompt keeps the display typing its persisted row
   // will get: on reconnect it renders as the same timeline event as history,
   // never as a user bubble; a real user quoting the marker text stays a user

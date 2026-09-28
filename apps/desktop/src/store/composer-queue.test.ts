@@ -112,6 +112,24 @@ describe('composer queue store', () => {
     expect(revokeObjectURL).not.toHaveBeenCalledWith(newUrl)
   })
 
+  it('captures one immutable send envelope at local enqueue and preserves it through edits and migration', () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1_790_594_548_125)
+
+    const queued = enqueueQueuedPrompt('rt-old', { attachments: [], text: 'queued identity probe' })
+
+    expect(queued?.envelope).toEqual({
+      clientMessageId: expect.any(String),
+      submittedAt: 1_790_594_548.125
+    })
+    expect(Object.isFrozen(queued?.envelope)).toBe(true)
+
+    const envelope = queued!.envelope
+    updateQueuedPromptText('rt-old', queued!.id, 'edited identity probe')
+    migrateQueuedPrompts('rt-old', 'rt-new')
+
+    expect(getQueuedPrompts('rt-new')[0]?.envelope).toBe(envelope)
+  })
+
   it('queues prompts in FIFO order', () => {
     enqueueQueuedPrompt(SESSION_KEY, { attachments: [], text: 'first' })
     enqueueQueuedPrompt(SESSION_KEY, { attachments: [], text: 'second' })

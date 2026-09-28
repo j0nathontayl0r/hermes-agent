@@ -3,6 +3,8 @@ writing a second one (#111868: a Desktop freeze during a slow first agent build 
 
 from types import SimpleNamespace
 
+import pytest
+
 from agent.turn_context import _stage_turn_user_message
 from hermes_state import SessionDB
 from run_agent import AIAgent
@@ -78,6 +80,53 @@ def test_submit_ack_binds_the_written_row_even_if_worker_consumes_staging(monkey
     finally:
         server._sessions.pop(sid, None)
         db.close()
+
+
+def test_submit_uses_valid_client_timestamp_and_persists_client_identity(monkeypatch, tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    sid, key = _desktop_session(monkeypatch, db)
+    session = server._sessions[sid]
+
+    class InlineThread:
+        def __init__(self, target, **kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(server.threading, "Thread", InlineThread)
+    monkeypatch.setattr(server, "_start_agent_build", lambda *args: None)
+    monkeypatch.setattr(server, "_restart_completed_failed_agent_build", lambda *args: False)
+    monkeypatch.setattr(server, "_run_after_agent_ready", lambda *args: session.pop("_submit_user_row", None))
+    monkeypatch.setattr(server.time, "time", lambda: 1_790_594_550.0)
+    try:
+        response = server.handle_request({"id": "p", "method": "prompt.submit", "params": {
+            "session_id": sid,
+            "text": "timestamp identity probe",
+            "submitted_at": 1_790_594_548.125,
+            "client_message_id": "desktop-message-abc",
+        }})
+
+        assert response["result"]["user_timestamp"] == 1_790_594_548.125
+        assert response["result"]["client_message_id"] == "desktop-message-abc"
+        rows = db.get_messages_as_conversation(key, include_row_ids=True)
+        assert rows[0]["timestamp"] == 1_790_594_548.125
+        assert rows[0]["display_metadata"]["client_message_id"] == "desktop-message-abc"
+    finally:
+        server._sessions.pop(sid, None)
+        db.close()
+
+
+@pytest.mark.parametrize(
+    "submitted_at",
+    [None, True, float("nan"), float("inf"), 946_684_799.999, 1_790_000_300.001, "1790000000"],
+)
+def test_invalid_or_absent_client_timestamp_falls_back_to_first_receipt(submitted_at):
+    received_at = 1_790_000_000.0
+
+    assert server._prompt_send_envelope(
+        {"submitted_at": submitted_at, "client_message_id": "client-a"}, received_at
+    ) == (received_at, "client-a")
 
 
 def test_turn_adopts_the_submit_row_and_writes_no_duplicate(monkeypatch, tmp_path):

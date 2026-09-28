@@ -105,6 +105,61 @@ def test_busy_accept_writes_the_queued_user_row_immediately(monkeypatch, tmp_pat
         db.close()
 
 
+def test_identity_bearing_busy_prompts_stay_separate_and_keep_their_envelopes(monkeypatch, tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    sid, key = _desktop_session(monkeypatch, db)
+    session = server._sessions[sid]
+    try:
+        _busy(session)
+        first = server._handle_busy_submit(
+            "r1", sid, session, "first queued", "ws-1", queued=True, display_kind=None,
+            display_metadata={"client_message_id": "client-first"},
+            user_timestamp=1_790_594_548.125, client_message_id="client-first")
+        second = server._handle_busy_submit(
+            "r2", sid, session, "second queued", "ws-1", queued=True, display_kind=None,
+            display_metadata={"client_message_id": "client-second"},
+            user_timestamp=1_790_594_549.25, client_message_id="client-second")
+
+        assert first["result"] == {
+            "status": "queued", "client_message_id": "client-first",
+            "user_timestamp": 1_790_594_548.125,
+            "user_row_id": first["result"]["user_row_id"],
+        }
+        assert second["result"]["client_message_id"] == "client-second"
+        assert [session["queued_prompt"]["text"], session["queued_prompts"][0]["text"]] == [
+            "first queued", "second queued"]
+
+        rows = db.get_messages_as_conversation(
+            key, repair_alternation=False, include_row_ids=True)
+        assert [row["timestamp"] for row in rows] == [1_790_594_548.125, 1_790_594_549.25]
+        assert [row["display_metadata"]["client_message_id"] for row in rows] == [
+            "client-first", "client-second"]
+
+        db.append_message(key, "assistant", content="reply A")
+        with session["history_lock"]:
+            session["running"] = False
+            server._clear_inflight_turn(session)
+        dispatched = {}
+        monkeypatch.setattr(
+            server, "_run_prompt_submit",
+            lambda _rid, _sid, _session, _text, **kwargs: dispatched.update(kwargs))
+
+        assert server._drain_queued_prompt("r3", sid, session) is True
+        assert dispatched["display_metadata"] == {"client_message_id": "client-first"}
+        assert dispatched["user_timestamp"] == 1_790_594_548.125
+        active = db.get_messages_as_conversation(
+            key, repair_alternation=False, include_row_ids=True)
+        queued_rows = [row for row in active if row["content"] in {"first queued", "second queued"}]
+        assert [(row["timestamp"], row["display_metadata"]["client_message_id"])
+                for row in queued_rows] == [
+            (1_790_594_548.125, "client-first"),
+            (1_790_594_549.25, "client-second"),
+        ]
+    finally:
+        server._sessions.pop(sid, None)
+        db.close()
+
+
 def test_queued_turn_replays_as_its_own_turn_after_the_live_turn(monkeypatch, tmp_path):
     """The accept-time row lands BEFORE the in-flight turn's assistant rows (raw [uA, uB, aA]);
     the drain must re-place it at the transcript end, so the repaired projection keeps FOUR

@@ -279,6 +279,7 @@ def test_prompt_submit_dispatches_to_compute_host_when_turn_isolation_enabled(mo
         ),
     )
     monkeypatch.setattr(server, "_get_compute_host_supervisor", lambda _cfg=None: fake_supervisor)
+    monkeypatch.setattr(server.time, "time", lambda: 1_790_594_550.0)
 
     try:
         resp = server.handle_request(
@@ -288,10 +289,14 @@ def test_prompt_submit_dispatches_to_compute_host_when_turn_isolation_enabled(mo
                 "params": {"session_id": "iso-sid", "text": "hello"},
             }
         )
-        assert resp["result"] == {"status": "streaming", "turn_isolation": True}
+        assert resp["result"] == {
+            "status": "streaming", "turn_isolation": True,
+            "user_timestamp": 1_790_594_550.0,
+        }
         assert fake_supervisor.frames[0]["type"] == "turn.start"
         assert fake_supervisor.frames[0]["sid"] == "iso-sid"
         assert fake_supervisor.frames[0]["text"] == "hello"
+        assert fake_supervisor.frames[0]["user_timestamp"] == 1_790_594_550.0
         assert fake_supervisor.frames[0]["history"] == seed_history
         assert server._sessions["iso-sid"]["history"] == seed_history
         assert parent_writes == {"ensure_session": 0, "persist_seed": 0}
@@ -387,6 +392,7 @@ def test_prompt_submit_fails_open_inline_when_compute_host_dispatch_breaks(monke
     inline_calls = []
     monkeypatch.setattr(server, "_load_cfg", lambda: {"dashboard": {"turn_isolation": True}})
     monkeypatch.setattr(server, "_get_compute_host_supervisor", lambda _cfg=None: _BrokenSupervisor())
+    monkeypatch.setattr(server.time, "time", lambda: 1_790_594_550.0)
     monkeypatch.setattr(server, "_ensure_session_db_row", lambda _session: None)
     monkeypatch.setattr(server, "_persist_branch_seed", lambda _session: None)
     monkeypatch.setattr(server, "_start_agent_build", lambda _sid, _session: None)
@@ -414,7 +420,7 @@ def test_prompt_submit_fails_open_inline_when_compute_host_dispatch_breaks(monke
     assert resp == {
         "jsonrpc": "2.0",
         "id": "fallback-turn",
-        "result": {"status": "streaming"},
+        "result": {"status": "streaming", "user_timestamp": 1_790_594_550.0},
     }
     assert inline_calls == [("fallback-turn", "iso-fallback", "hello")]
     assert session.get("_compute_host_active") is not True
@@ -4692,9 +4698,14 @@ def test_compute_host_turn_frame_carries_the_session_login(monkeypatch):
                             history_lock=threading.Lock(), cwd="/tmp", cols=80)
     monkeypatch.setattr(server, "_session_cwd", lambda session: "/tmp")
 
-    frame = server._compute_host_turn_frame("rid", "sid-host", record, "hello")
+    frame = server._compute_host_turn_frame(
+        "rid", "sid-host", record, "hello",
+        display_metadata={"client_message_id": "client-host"},
+        user_timestamp=1_790_594_548.125)
 
     assert frame["auth_user_id"] == "basic:alice"
+    assert frame["display_metadata"] == {"client_message_id": "client-host"}
+    assert frame["user_timestamp"] == 1_790_594_548.125
 
 
 def test_attaching_a_different_login_keeps_the_creator_and_warns_once(monkeypatch):

@@ -129,15 +129,17 @@ export function isStrictAnswerTextExtension(next: string, previous: string): boo
  */
 function carryRowIdentity(next: ChatMessage, previous: ChatMessage): ChatMessage {
   const rowId = next.rowId === undefined ? previous.rowId : undefined
+  const clientMessageId = next.clientMessageId === undefined ? previous.clientMessageId : undefined
   const reactions = next.reactions === undefined && previous.reactions?.length ? previous.reactions : undefined
 
-  if (rowId === undefined && !reactions) {
+  if (rowId === undefined && clientMessageId === undefined && !reactions) {
     return next
   }
 
   return {
     ...next,
     ...(rowId !== undefined ? { rowId } : {}),
+    ...(clientMessageId !== undefined ? { clientMessageId } : {}),
     ...(reactions ? { reactions: [...reactions] } : {})
   }
 }
@@ -213,6 +215,7 @@ const _chatMessageFieldsExhaustive: {
 
 const COMPARED_FIELDS = [
   'rowId',
+  'clientMessageId',
   'persistedTurn',
   'durableComplete',
   'recovered',
@@ -335,6 +338,7 @@ export function chatMessagesEquivalent(a: ChatMessage, b: ChatMessage): boolean 
   if (
     a.id !== b.id ||
     a.rowId !== b.rowId ||
+    a.clientMessageId !== b.clientMessageId ||
     !persistedTurnsEquivalent(a.persistedTurn, b.persistedTurn) ||
     a.role !== b.role ||
     a.durableComplete !== b.durableComplete ||
@@ -407,11 +411,21 @@ export function reconcileResumeMessages(nextMessages: ChatMessage[], previousMes
 
   const previousByRoleOrdinal = new Map<string, ChatMessage>()
   const previousRoleCounts = new Map<string, number>()
+  const previousByRowId = new Map<number, ChatMessage>()
+  const previousByClientMessageId = new Map<string, ChatMessage>()
 
   for (const message of previousMessages) {
     const ordinal = previousRoleCounts.get(message.role) ?? 0
     previousRoleCounts.set(message.role, ordinal + 1)
     previousByRoleOrdinal.set(`${message.role}:${ordinal}`, message)
+
+    for (const rowId of transcriptRowIds(message)) {
+      previousByRowId.set(rowId, message)
+    }
+
+    if (message.clientMessageId) {
+      previousByClientMessageId.set(message.clientMessageId, message)
+    }
   }
 
   const nextRoleCounts = new Map<string, number>()
@@ -420,7 +434,21 @@ export function reconcileResumeMessages(nextMessages: ChatMessage[], previousMes
     const ordinal = nextRoleCounts.get(message.role) ?? 0
     nextRoleCounts.set(message.role, ordinal + 1)
 
-    const previous = previousByRoleOrdinal.get(`${message.role}:${ordinal}`)
+    const rowIdentityMatch = transcriptRowIds(message)
+      .map(rowId => previousByRowId.get(rowId))
+      .find((candidate): candidate is ChatMessage => candidate !== undefined)
+
+    const clientIdentityCandidate = message.clientMessageId
+      ? previousByClientMessageId.get(message.clientMessageId)
+      : undefined
+
+    const clientIdentityMatch =
+      clientIdentityCandidate && !conflictingTranscriptIdentity(clientIdentityCandidate, message)
+        ? clientIdentityCandidate
+        : undefined
+
+    const previous =
+      rowIdentityMatch ?? clientIdentityMatch ?? previousByRoleOrdinal.get(`${message.role}:${ordinal}`)
 
     if (!previous || conflictingTranscriptIdentity(previous, message)) {
       return message
@@ -1134,10 +1162,30 @@ export function appendLiveSessionProjection(messages: ChatMessage[], projection:
     break
   }
 
+  const inflightClientMessageId = (() => {
+    let metadata: unknown = projection.inflight?.display_metadata
+
+    if (typeof metadata === 'string') {
+      try {
+        metadata = JSON.parse(metadata)
+      } catch {
+        return undefined
+      }
+    }
+
+    const value = metadata && typeof metadata === 'object' ? (metadata as { client_message_id?: unknown }).client_message_id : null
+
+    return typeof value === 'string' && value ? value : undefined
+  })()
+
   const persistedInLatestRun = (text: string): boolean =>
-    latestUserRun.some(
-      message => textWithoutReferenceLines(chatMessageText(message)) === textWithoutReferenceLines(text)
-    )
+    latestUserRun.some(message => {
+      if (inflightClientMessageId && message.clientMessageId) {
+        return inflightClientMessageId === message.clientMessageId
+      }
+
+      return textWithoutReferenceLines(chatMessageText(message)) === textWithoutReferenceLines(text)
+    })
 
   const inflightUserAlreadyPersisted =
     projection[safelyPersistedInflightUser] === true || (Boolean(inflightUser) && persistedInLatestRun(inflightUser))
@@ -1154,7 +1202,7 @@ export function appendLiveSessionProjection(messages: ChatMessage[], projection:
         role: 'user',
         content: inflightUser,
         ...(displayKind ? { display_kind: displayKind } : {}),
-        ...(displayKind && projection.inflight?.display_metadata !== undefined
+        ...(projection.inflight?.display_metadata !== undefined
           ? { display_metadata: projection.inflight.display_metadata }
           : {})
       }

@@ -6,6 +6,7 @@ method_ctx.bind_module), so they reference server.py globals bare.
 
 import contextlib
 
+
 from .method_ctx import HandlerRegistry, bind_module
 
 _registry = HandlerRegistry()
@@ -15,6 +16,22 @@ _profile_scoped = _registry.profile_scoped
 
 _STALE_TARGET_MSG = "target user message is no longer in session history"
 _GROUP_PROBE_FAILED_MSG = "Could not verify this group. Try again after the gateway recovers."
+_MIN_CLIENT_SUBMITTED_AT = 946_684_800.0  # 2000-01-01T00:00:00Z
+_MAX_CLIENT_CLOCK_LEAD_SECONDS = 5 * 60.0
+
+
+def _prompt_send_envelope(params: dict, received_at: float) -> tuple[float, str | None]:
+    """Validate the optional client envelope once; bad values degrade to receipt time."""
+    from math import isfinite
+    raw_timestamp = params.get("submitted_at")
+    user_timestamp = received_at
+    if (isinstance(raw_timestamp, (int, float)) and not isinstance(raw_timestamp, bool)
+            and isfinite(raw_timestamp)
+            and _MIN_CLIENT_SUBMITTED_AT <= float(raw_timestamp) <= received_at + _MAX_CLIENT_CLOCK_LEAD_SECONDS):
+        user_timestamp = float(raw_timestamp)
+    raw_client_id = params.get("client_message_id")
+    client_message_id = raw_client_id if isinstance(raw_client_id, str) and raw_client_id else None
+    return user_timestamp, client_message_id
 
 
 def _history_user_indices(history: list) -> list:
@@ -444,7 +461,9 @@ def _storage_error_data(failure, raw) -> dict:
     return {"code": failure.code, "cause": failure.cause, "details": storage_failure_details(raw)}
 
 
-def _persist_session_row_for_submit(rid, session, text=None, display_kind=None):
+def _persist_session_row_for_submit(
+    rid, session, text=None, display_kind=None, display_metadata=None, user_timestamp=None
+):
     """Lazily persist the DB row now that the user sent a message (a branch becomes real
     here), then the message itself (#111868: a freeze during the first build must leave a
     resumable transcript); the error reply is the only user-visible signal (desktop maps it to a toast)."""
@@ -459,7 +478,9 @@ def _persist_session_row_for_submit(rid, session, text=None, display_kind=None):
                 data=_storage_error_data(failure, _db_error))
         else:
             _persist_branch_seed(session)
-            _persist_submit_user_row(session, text, display_kind)
+            _persist_submit_user_row(
+                session, text, display_kind, display_metadata=display_metadata,
+                user_timestamp=user_timestamp)
             return None
     except Exception as exc:
         failure = describe_storage_failure(exc)
@@ -488,7 +509,8 @@ def _persist_session_row_for_submit(rid, session, text=None, display_kind=None):
 
 
 def _run_after_agent_ready(
-    rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback, turn_author=None
+    rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback,
+    turn_author=None, user_timestamp=None
 ):
     """Turn thread body: patient wait for a deferred build (a slow build must not eat the
     accepted in-flight message), then run."""
@@ -519,7 +541,8 @@ def _run_after_agent_ready(
             return
     _run_prompt_submit(
         rid, sid, session, text, display_kind=display_kind, display_metadata=display_metadata,
-        terminal_callback=hosted_terminal_callback, turn_author=turn_author)
+        terminal_callback=hosted_terminal_callback, turn_author=turn_author,
+        user_timestamp=user_timestamp)
 
 
 _TRUNCATION_PARAMS = (
@@ -565,6 +588,8 @@ _CLIENT_SURFACES = frozenset({"hud", "voice-live"})
 @method("prompt.submit")
 def _(rid, params: dict) -> dict:
     from hermes_cli.input_sanitize import sanitize_user_prompt_text
+    received_at = time.time()
+    user_timestamp, client_message_id = _prompt_send_envelope(params, received_at)
     sid = params.get("session_id", "")
     raw_text = params.get("text", "")
     text = sanitize_user_prompt_text(raw_text) if isinstance(raw_text, str) else raw_text
@@ -572,11 +597,11 @@ def _(rid, params: dict) -> dict:
     # whitelisted to "hidden" — this RPC must not mint kinds.
     display_kind = "hidden" if params.get("display_kind") == "hidden" else None
     title_preview = params.get("title_preview")
-    display_metadata = (
-        {"title_preview": title_preview[:1000]}
-        if isinstance(title_preview, str) and title_preview.strip()
-        else None
-    )
+    display_metadata = {
+        **({"title_preview": title_preview[:1000]}
+           if isinstance(title_preview, str) and title_preview.strip() else {}),
+        **({"client_message_id": client_message_id} if client_message_id else {}),
+    } or None
     if (stopped := _typed_stop_phrase_response(rid, text)) is not None:
         return stopped
     if params.get("interrupted"):
@@ -651,7 +676,8 @@ def _(rid, params: dict) -> dict:
             return _err(rid, 4009, "session busy")
         busy_response = _handle_busy_submit(
             rid, sid, session, text, busy_transport, queued=bool(params.get("queued")), turn_author=turn_author,
-            display_kind=display_kind)
+            display_kind=display_kind, display_metadata=display_metadata,
+            user_timestamp=user_timestamp, client_message_id=client_message_id)
         if busy_response is not None:
             return busy_response
     raw_rebind_ids = params.get("rebind_survivor_row_ids")
@@ -662,12 +688,16 @@ def _(rid, params: dict) -> dict:
         rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task, display_kind)
     if err is not None:
         return err
+    survivor_fields.update(
+        user_timestamp=user_timestamp,
+        **({"client_message_id": client_message_id} if client_message_id else {}))
     if turn_isolation:
         if turn_author:
             logger.debug("isolated compute turns carry no author yet; the turn from %s runs unattributed",
                          turn_author.get("id"))
         isolated_response = _submit_prompt_to_compute_host(
-            rid, sid, session, text, display_kind=display_kind, display_metadata=display_metadata)
+            rid, sid, session, text, display_kind=display_kind, display_metadata=display_metadata,
+            user_timestamp=user_timestamp)
         if not isolated_response.get("error"):
             # The truncation already happened inline above (memory + DB).
             isolated_response["result"].update(survivor_fields)
@@ -683,7 +713,8 @@ def _(rid, params: dict) -> dict:
         logger.warning(
             "compute-host dispatch failed for session %s; falling back inline: %s", sid,
             isolated_response["error"].get("message", "unknown error"))
-    if (err := _persist_session_row_for_submit(rid, session, text, display_kind)) is not None:
+    if (err := _persist_session_row_for_submit(
+            rid, session, text, display_kind, display_metadata, user_timestamp)) is not None:
         return err
     # Capture before starting the worker: it consumes the staging dict and may finish before the RPC returns.
     staged_user = session.get("_submit_user_row") or {}
@@ -694,7 +725,8 @@ def _(rid, params: dict) -> dict:
         _start_agent_build(sid, session)
     run_thread = threading.Thread(
         target=lambda: _run_after_agent_ready(
-            rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback, turn_author),
+            rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback,
+            turn_author, user_timestamp),
         daemon=True)
     # Handle lets session.interrupt tell a live turn from a stuck `running` flag.
     session["_run_thread"] = run_thread

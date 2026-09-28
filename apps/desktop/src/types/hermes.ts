@@ -636,6 +636,7 @@ export type TimelineDisplayMetadata =
       display_text?: string
     }
   | { display_text: string }
+  | { client_message_id: string }
   | { reactions: MessageReaction[] }
   | { tool_result_metadata: ToolResultMetadata }
 

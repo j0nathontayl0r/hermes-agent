@@ -1,6 +1,8 @@
 import { SLASH_COMMAND_RE } from '@hermes/shared'
 import { atom } from 'nanostores'
 
+import { createSendEnvelope, type SendEnvelope } from '@/lib/send-envelope'
+
 import { type ComposerAttachment, revokeAttachmentPreviewUrls, revokeDiscardedAttachmentPreviews } from './composer'
 
 export interface RemoveQueuedPromptOptions {
@@ -14,6 +16,8 @@ export interface RemoveQueuedPromptOptions {
 export interface QueuedPromptEntry {
   id: string
   text: string
+  /** Captured once at enqueue; absent only on queues persisted by older Desktop builds. */
+  readonly envelope?: SendEnvelope
   /** What the queue panel and the sent bubble show, when it differs from the
    *  text the agent receives. A queued `/skill` invocation carries the whole
    *  expanded skill body as `text` — the UI shows the invocation instead. */
@@ -174,6 +178,7 @@ export const enqueueQueuedPrompt = (
   const entry: QueuedPromptEntry = {
     id: nextId(),
     text: payload.text,
+    envelope: createSendEnvelope(),
     ...(payload.displayText ? { displayText: payload.displayText } : {}),
     ...(payload.displayKind ? { displayKind: payload.displayKind } : {}),
     attachments: cloneAttachments(payload.attachments),

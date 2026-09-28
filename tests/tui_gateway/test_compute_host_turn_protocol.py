@@ -116,6 +116,39 @@ def test_turn_start_streams_deltas_then_turn_end_with_history_identity(turn_env)
     assert "ended_ns" in end
 
 
+def test_turn_start_forwards_user_send_envelope_to_gateway(turn_env, monkeypatch):
+    out = io.StringIO()
+    host = ComputeHost(stdout=out, heartbeat_secs=0)
+    sid = "s1-envelope"
+    session = _session(_agent([]))
+    captured = {}
+    server._sessions[sid] = session
+
+    def run_prompt_submit(_request_id, _sid, _session, _text, **kwargs):
+        captured.update(kwargs)
+        with session["history_lock"]:
+            session["running"] = False
+            server._clear_inflight_turn(session)
+
+    monkeypatch.setattr(server, "_run_prompt_submit", run_prompt_submit)
+    try:
+        host.handle_frame({
+            "type": "turn.start",
+            "sid": sid,
+            "request_id": "turn-envelope",
+            "prompt": "hello",
+            "display_metadata": {"client_message_id": "client-host"},
+            "user_timestamp": 1_790_594_548.125,
+        })
+        _wait(out, lambda frame: frame["type"] == "turn.end")
+    finally:
+        server._sessions.pop(sid, None)
+        host.close()
+
+    assert captured["display_metadata"] == {"client_message_id": "client-host"}
+    assert captured["user_timestamp"] == 1_790_594_548.125
+
+
 def test_turn_start_without_sid_is_a_turn_error(turn_env):
     out = io.StringIO()
     host = ComputeHost(stdout=out, heartbeat_secs=0)
