@@ -14,7 +14,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/hermes-agent
+  # Use a dedicated package name so this fork's GITHUB_TOKEN owns the
+  # package linkage instead of colliding with an existing hermes-agent package.
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/hermes-agent-dogfood
 
 jobs:
   build-publish-smoke:
