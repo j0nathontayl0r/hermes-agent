@@ -4,6 +4,13 @@ on:
   push:
     branches:
       - dogfood/timestamp-identity-image
+  pull_request:
+    branches:
+      - dogfood/timestamp-identity-image
+    paths:
+      - .github/dogfood-source-sha
+      - .github/workflows/dogfood-image.yml
+      - .github/workflows/fork-ci.yml
 
 permissions:
   contents: read
@@ -181,6 +188,7 @@ jobs:
   publish-image:
     name: Publish tested image
     needs: test-image
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
