@@ -11,7 +11,10 @@ name: Nix flake check
 # fast required jobs beside it. A separate run reruns and cancels on its own.
 
 on:
+  # Dogfood branch PRs use fork-ci.yml; the 32-core Nix runner label is not
+  # provisioned in this personal fork.
   pull_request:
+    branches: [main]
   push:
     branches: [main]
 
