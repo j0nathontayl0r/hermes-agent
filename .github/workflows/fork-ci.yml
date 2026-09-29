@@ -1,0 +1,66 @@
+name: Fork Branch CI
+
+on:
+  push:
+    branches:
+      - "fix/**"
+      - "dogfood/**"
+      - "ci/**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-tests:
+    name: Test exact dogfood source
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Check out exact dogfood source when pinned
+        shell: bash
+        run: |
+          set -euo pipefail
+          marker=.github/dogfood-source-sha
+          if [[ ! -f "$marker" ]]; then
+            exit 0
+          fi
+          source_sha="$(tr -d '[:space:]' < "$marker")"
+          if [[ ! "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::$marker must contain one full commit SHA"
+            exit 1
+          fi
+          git fetch origin "$source_sha"
+          git checkout --detach "$source_sha"
+
+      - name: Set up locked Python and test dependencies
+        uses: ./.github/actions/setup-pm
+        with:
+          extras: '["messaging"]'
+          test-environment: 'true'
+          prune-python-cache: true
+
+      - name: Run Signal and gateway policy tests
+        run: |
+          scripts/run_tests.sh \
+            tests/gateway/test_signal.py \
+            tests/gateway/test_unauthorized_dm_behavior.py \
+            tests/gateway/test_profile_resolution.py
+        env:
+          HERMES_TEST_FILE_RETRIES: "0"
+          OPENROUTER_API_KEY: ""
+          OPENAI_API_KEY: ""
+          NOUS_API_KEY: ""
+
+      - name: Check Windows portability footguns
+        run: python scripts/check-windows-footguns.py
