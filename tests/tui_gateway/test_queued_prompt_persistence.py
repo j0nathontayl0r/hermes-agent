@@ -339,6 +339,7 @@ def test_queued_turn_replays_as_its_own_turn_after_the_live_turn(monkeypatch, tm
         every = db.get_messages_as_conversation(key, include_inactive=True, include_row_ids=True)
         superseded = [r for r in every if "QUEUED-MARKER" in str(r["content"]) and r["_row_id"] != active[0]["_row_id"]]
         assert len(superseded) == 1  # durable history, never deleted
+        assert active[0]["message_uid"] == superseded[0]["message_uid"]
     finally:
         server._sessions.pop(sid, None)
         db.close()

@@ -373,7 +373,8 @@ def _replace_queued_user_row_for_turn(session: dict, queued: dict) -> dict | Non
     _persist_submit_user_row(
         session, queued.get("text"), queued.get("_queued_display_kind"),
         display_metadata=queued.get("display_metadata"),
-        user_timestamp=queued.get("user_timestamp"))
+        user_timestamp=queued.get("user_timestamp"),
+        message_uid=early.get("message_uid"))
     fresh = session.get("_submit_user_row")
     if not (isinstance(fresh, dict) and isinstance(fresh.get("_row_id"), int)):
         return None  # re-append wrote nothing: keep the accept-time row active
