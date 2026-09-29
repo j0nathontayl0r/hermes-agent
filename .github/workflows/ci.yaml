@@ -15,7 +15,11 @@ name: CI
 # main-only automation uses protected environments in its own workflows.
 
 on:
+  # Full upstream CI uses larger Nous runners that are unavailable to this
+  # personal fork. Operational dogfood PRs are gated by fork-ci.yml instead;
+  # PRs targeting main retain the complete upstream matrix.
   pull_request:
+    branches: [main]
   push:
     branches: [main]
 

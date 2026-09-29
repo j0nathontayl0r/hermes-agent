@@ -4,10 +4,16 @@ on:
   push:
     branches:
       - dogfood/timestamp-identity-image
+  pull_request:
+    branches:
+      - dogfood/timestamp-identity-image
+    paths:
+      - .github/dogfood-source-sha
+      - .github/workflows/dogfood-image.yml
+      - .github/workflows/fork-ci.yml
 
 permissions:
   contents: read
-  packages: write
 
 concurrency:
   group: timestamp-identity-dogfood-image
@@ -19,9 +25,15 @@ env:
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/hermes-agent-dogfood
 
 jobs:
-  build-publish-smoke:
+  test-image:
+    name: Test exact source and image
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      contents: read
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
+      short_sha: ${{ steps.source.outputs.short }}
     steps:
       - name: Check out image-builder branch
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -45,6 +57,25 @@ jobs:
           ref: ${{ steps.source.outputs.sha }}
           fetch-depth: 0
 
+      - name: Set up locked Python and test dependencies
+        uses: ./.github/actions/setup-pm
+        with:
+          extras: '["messaging"]'
+          test-environment: 'true'
+          prune-python-cache: true
+
+      - name: Run Signal and gateway policy tests
+        run: |
+          scripts/run_tests.sh \
+            tests/gateway/test_signal.py \
+            tests/gateway/test_unauthorized_dm_behavior.py \
+            tests/gateway/test_profile_resolution.py
+        env:
+          HERMES_TEST_FILE_RETRIES: "0"
+          OPENROUTER_API_KEY: ""
+          OPENAI_API_KEY: ""
+          NOUS_API_KEY: ""
+
       - name: Write immutable image provenance
         env:
           SOURCE_SHA: ${{ steps.source.outputs.sha }}
@@ -59,6 +90,122 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
+      - name: Build unprivileged linux/amd64 image archive
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: false
+          tags: |
+            ${{ env.IMAGE_NAME }}:dogfood-timestamp-identity
+            ${{ env.IMAGE_NAME }}:dogfood-${{ steps.source.outputs.short }}
+          labels: |
+            org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          outputs: type=docker,dest=/tmp/hermes-dogfood.tar
+          cache-from: type=gha,scope=timestamp-identity-dogfood-amd64
+          cache-to: type=gha,mode=max,scope=timestamp-identity-dogfood-amd64
+
+      - name: Smoke-test the unpublished image
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          SHORT_SHA: ${{ steps.source.outputs.short }}
+        run: |
+          set -euo pipefail
+          docker load --input /tmp/hermes-dogfood.tar
+          ref="${IMAGE_NAME}:dogfood-${SHORT_SHA}"
+          docker run --rm --entrypoint python -e EXPECTED_SHA="$SOURCE_SHA" "$ref" -c '
+          import json, os
+          from pathlib import Path
+          from types import SimpleNamespace
+          from gateway.config import GatewayConfig, Platform, PlatformConfig
+          from gateway.platforms.signal import SignalAdapter
+          from gateway.run import GatewayRunner
+          from gateway.session import SessionSource
+          from tui_gateway.contracts.prompt_voice import PromptSubmitParams, PromptSubmitResult
+
+          # Set policy after imports because gateway startup modules may load profile environment.
+          os.environ["SIGNAL_GROUP_ALLOWED_USERS"] = "hermes-group"
+          os.environ["SIGNAL_ALLOWED_USERS"] = "__group_only__"
+          os.environ["SIGNAL_REACTIONS"] = "true"
+
+          stamp = json.loads(Path("/opt/hermes/install-stamp.json").read_text())
+          assert stamp["commit"] == os.environ["EXPECTED_SHA"], stamp
+          assert {"submitted_at", "client_message_id"} <= set(PromptSubmitParams.model_fields)
+          assert {"user_timestamp", "client_message_id", "user_row_id"} <= set(PromptSubmitResult.model_fields)
+
+          group_id = "hermes-group"
+          chat_id = f"group:{group_id}"
+          signal_config = PlatformConfig(
+              enabled=True,
+              extra={"group_allowed_chats": [chat_id]},
+          )
+          adapter = SignalAdapter(signal_config)
+          runner = object.__new__(GatewayRunner)
+          runner.config = GatewayConfig(platforms={Platform.SIGNAL: signal_config})
+          runner.adapters = {Platform.SIGNAL: adapter}
+          runner._pairing_stores = {}
+
+          def source(chat_type, chat, alt=None):
+              return SessionSource(
+                  platform=Platform.SIGNAL,
+                  chat_id=chat,
+                  chat_id_alt=alt,
+                  chat_type=chat_type,
+                  user_id="owner",
+              )
+
+          allowed_group = source("group", chat_id, group_id)
+          other_group = source("group", "group:other-group", "other-group")
+          direct = source("dm", "owner")
+
+          # Production has two gates: adapter intake uses the raw group ID from
+          # SIGNAL_GROUP_ALLOWED_USERS; gateway authorization uses the matching
+          # group:<id> entry persisted in config.yaml.
+          assert adapter.group_allow_from == {group_id}
+          assert signal_config.extra["group_allowed_chats"] == [chat_id]
+          assert adapter._group_allowed(group_id)
+          assert not adapter._group_allowed("other-group")
+          assert runner._is_user_authorized(allowed_group)
+          assert not runner._is_user_authorized(other_group)
+          assert not runner._is_user_authorized(direct)
+          assert adapter._reactions_enabled(SimpleNamespace(source=allowed_group))
+          assert not adapter._reactions_enabled(SimpleNamespace(source=other_group))
+          assert not adapter._reactions_enabled(SimpleNamespace(source=direct))
+          print("dogfood image smoke test passed")
+          '
+
+      - name: Upload tested image archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tested-dogfood-image-${{ steps.source.outputs.short }}
+          path: /tmp/hermes-dogfood.tar
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
+  publish-image:
+    name: Publish tested image
+    needs: test-image
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      packages: write
+    steps:
+      - name: Download tested image archive
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: tested-dogfood-image-${{ needs.test-image.outputs.short_sha }}
+          path: /tmp/tested-image
+
+      - name: Load tested image
+        run: docker load --input /tmp/tested-image/hermes-dogfood.tar
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
@@ -66,47 +213,50 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
-      - name: Build and publish linux/amd64 image
-        id: image
-        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
-        with:
-          context: .
-          file: Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: |
-            ${{ env.IMAGE_NAME }}:dogfood-timestamp-identity
-            ${{ env.IMAGE_NAME }}:dogfood-${{ steps.source.outputs.short }}
-          labels: |
-            org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-          cache-from: type=gha,scope=timestamp-identity-dogfood-amd64
-          cache-to: type=gha,mode=max,scope=timestamp-identity-dogfood-amd64
-
-      - name: Pull and smoke-test the published digest
+      - name: Publish exact tested tags and verify digest equality
+        id: publish
         env:
-          DIGEST: ${{ steps.image.outputs.digest }}
-          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          SHORT_SHA: ${{ needs.test-image.outputs.short_sha }}
         run: |
           set -euo pipefail
-          ref="${IMAGE_NAME}@${DIGEST}"
-          docker pull "$ref"
-          docker run --rm --entrypoint python -e EXPECTED_SHA="$SOURCE_SHA" "$ref" -c '
-          import json, os
-          from pathlib import Path
-          from tui_gateway.contracts.prompt_voice import PromptSubmitParams, PromptSubmitResult
-          stamp = json.loads(Path("/opt/hermes/install-stamp.json").read_text())
-          assert stamp["commit"] == os.environ["EXPECTED_SHA"], stamp
-          assert {"submitted_at", "client_message_id"} <= set(PromptSubmitParams.model_fields)
-          assert {"user_timestamp", "client_message_id", "user_row_id"} <= set(PromptSubmitResult.model_fields)
-          print("dogfood image smoke test passed")
-          '
+          immutable="${IMAGE_NAME}:dogfood-${SHORT_SHA}"
+          rolling="${IMAGE_NAME}:dogfood-timestamp-identity"
+          docker push "$immutable" 2>&1 | tee /tmp/immutable-push.log
+          docker push "$rolling"
+          python3 - "$immutable" "$rolling" /tmp/immutable-push.log "$GITHUB_OUTPUT" <<'PY'
+          import hashlib
+          import re
+          import subprocess
+          import sys
+
+          immutable, rolling, push_log_path, output_path = sys.argv[1:]
+          def digest(ref):
+              raw = subprocess.check_output(
+                  ["docker", "buildx", "imagetools", "inspect", "--raw", ref]
+              )
+              return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+          push_log = open(push_log_path, encoding="utf-8").read()
+          match = re.search(r"digest:\s+(sha256:[0-9a-f]{64})", push_log)
+          if not match:
+              raise SystemExit("docker push did not report an immutable digest")
+          pushed_digest = match.group(1)
+          immutable_digest = digest(immutable)
+          rolling_digest = digest(rolling)
+          if not pushed_digest == immutable_digest == rolling_digest:
+              raise SystemExit(
+                  "published digest mismatch: "
+                  f"push={pushed_digest} immutable={immutable_digest} rolling={rolling_digest}"
+              )
+          with open(output_path, "a", encoding="utf-8") as output:
+              output.write(f"digest={pushed_digest}\n")
+          PY
 
       - name: Publish deployment receipt
         env:
-          DIGEST: ${{ steps.image.outputs.digest }}
-          SOURCE_SHA: ${{ steps.source.outputs.sha }}
-          SHORT_SHA: ${{ steps.source.outputs.short }}
+          DIGEST: ${{ steps.publish.outputs.digest }}
+          SOURCE_SHA: ${{ needs.test-image.outputs.source_sha }}
+          SHORT_SHA: ${{ needs.test-image.outputs.short_sha }}
         run: |
           {
             echo "## Timestamp identity dogfood image"
@@ -116,5 +266,5 @@ jobs:
             echo "- Immutable tag: \`${IMAGE_NAME}:dogfood-${SHORT_SHA}\`"
             echo "- Rolling tag: \`${IMAGE_NAME}:dogfood-timestamp-identity\`"
             echo
-            echo "Deploy by digest; use the rolling tag only for convenience."
+            echo "The published digest is the exact archive that passed unit and container smoke tests."
           } >> "$GITHUB_STEP_SUMMARY"

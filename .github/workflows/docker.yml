@@ -9,7 +9,10 @@ on:
   #
   # Trusted main pushes resolve the environment-scoped Docker Hub secrets in
   # this same workflow, never across a workflow boundary.
+  # Dogfood branch PRs use fork-ci.yml. Keep the upstream multi-arch matrix
+  # for PRs targeting main, where its larger runner labels are available.
   pull_request:
+    branches: [main]
   push:
     branches: [main]
   release:
