@@ -945,11 +945,17 @@ class SignalAdapter(BasePlatformAdapter):
         return (raw["sender"], raw["timestamp_ms"]) if ok else None
 
     def _reactions_enabled(self, event: "MessageEvent" = None) -> bool:
-        """SIGNAL_REACTIONS env gate, then the DM allowlist: reactions fire before run.py's auth gate,
-        so an unauthorized contact's 👀 would otherwise reveal a listening bot."""
+        """Allow reactions only for authorized DM senders or explicitly allowed groups."""
         if os.getenv("SIGNAL_REACTIONS", "true").lower() in {"false", "0", "no"}:
             return False
-        sender = getattr(getattr(event, "source", None), "user_id", None) if event is not None else None
+        source = getattr(event, "source", None) if event is not None else None
+        if source is not None and getattr(source, "chat_type", None) == "group":
+            group_id = getattr(source, "chat_id_alt", None)
+            if not group_id:
+                chat_id = str(getattr(source, "chat_id", "") or "")
+                group_id = chat_id.removeprefix("group:")
+            return bool(group_id) and ("*" in self.group_allow_from or group_id in self.group_allow_from)
+        sender = getattr(source, "user_id", None)
         return not (sender and "*" not in self.dm_allow_from and sender not in self.dm_allow_from)
 
     async def on_processing_start(self, event: MessageEvent) -> None:
