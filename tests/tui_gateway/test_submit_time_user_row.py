@@ -171,8 +171,8 @@ def test_failed_submit_persistence_releases_client_ack_reservation(monkeypatch, 
             session["running"] = True
             server._start_inflight_turn(
                 session, "retry after disk full", client_message_id=client_message_id)
-            session["inflight_turn"]["_submit_ack_ready"] = (
-                server._reserve_client_message_admission_locked(session, client_message_id))
+            ready = server._reserve_client_message_admission_locked(session, client_message_id)
+            session["inflight_turn"]["_submit_ack_ready"] = ready
 
         response = server._persist_session_row_for_submit(
             "failed", session, "retry after disk full", None,
@@ -181,9 +181,29 @@ def test_failed_submit_persistence_releases_client_ack_reservation(monkeypatch, 
 
         assert response["error"]["data"]["code"] == "disk_full"
         assert client_message_id not in session.get("_client_message_admissions", {})
+        # A concurrent duplicate that was waiting on this admission learns the real cause.
+        duplicate = server._await_client_message_ack("duplicate", session, client_message_id, ready)
+        assert duplicate["id"] == "duplicate"
+        assert duplicate["error"] == response["error"]
     finally:
         server._sessions.pop(sid, None)
         db.close()
+
+
+def test_resolved_client_acks_are_bounded_without_dropping_pending_admissions():
+    session = {"history_lock": threading.RLock()}
+    cap = server._MAX_RESOLVED_CLIENT_MESSAGE_ACKS
+    with session["history_lock"]:
+        pending = server._reserve_client_message_admission_locked(session, "still-pending")
+        for n in range(cap + 10):
+            server._remember_client_message_ack_locked(
+                session, f"sent-{n}", {"status": "streaming", "client_message_id": f"sent-{n}"})
+
+    admissions = session["_client_message_admissions"]
+    resolved = [cid for cid, entry in admissions.items() if "ack" in entry]
+    assert len(resolved) == cap
+    assert f"sent-{cap + 9}" in resolved and "sent-0" not in resolved
+    assert admissions["still-pending"]["ready"] is pending and not pending.is_set()
 
 
 def test_concurrent_idle_retries_share_one_admission_and_original_ack(monkeypatch, tmp_path):

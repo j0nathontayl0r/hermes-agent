@@ -507,12 +507,9 @@ def _persist_session_row_for_submit(
     # this rejected prompt as live. Release the slot a turn would normally own.
     with session["history_lock"]:
         turn = session.get("inflight_turn")
-        ready = turn.get("_submit_ack_ready") if isinstance(turn, dict) else None
-        set_ready = getattr(ready, "set", None)
-        if callable(set_ready):
-            set_ready()
+        _signal_admission_ready(turn.get("_submit_ack_ready") if isinstance(turn, dict) else None, error)
         _release_client_message_admission_locked(
-            session, turn.get("client_message_id") if isinstance(turn, dict) else None)
+            session, turn.get("client_message_id") if isinstance(turn, dict) else None, error)
         session["running"] = False
         session["last_active"] = time.time()
         session.pop("_hosted_room_task", None)
@@ -557,6 +554,10 @@ def _run_after_agent_ready(
         terminal_callback=hosted_terminal_callback, turn_author=turn_author,
         user_timestamp=user_timestamp)
 
+
+# Resolved acks kept in memory per session; older ones replay from the durable user row
+# (``_client_message_ack``'s DB fallback), so the cap only bounds memory, never idempotency.
+_MAX_RESOLVED_CLIENT_MESSAGE_ACKS = 64
 
 _TRUNCATION_PARAMS = (
     "truncate_before_user_ordinal", "truncate_before_row_id", "truncate_before_message_id")
@@ -606,12 +607,24 @@ def _reserve_client_message_admission_locked(
     return ready
 
 
-def _release_client_message_admission_locked(session: dict, client_message_id: str | None) -> None:
+def _release_client_message_admission_locked(
+    session: dict, client_message_id: str | None, error_response: dict | None = None
+) -> None:
+    """Drop a reservation whose admission failed; a concurrent duplicate waiting on it
+    receives ``error_response``'s error instead of a generic retry."""
     if not client_message_id:
         return
     admissions = session.get("_client_message_admissions")
     admission = admissions.pop(client_message_id, None) if isinstance(admissions, dict) else None
     ready = admission.get("ready") if isinstance(admission, dict) else None
+    _signal_admission_ready(ready, error_response)
+
+
+def _signal_admission_ready(ready: object, error_response: dict | None = None) -> None:
+    if ready is None:
+        return
+    if isinstance(error_response, dict) and isinstance(error_response.get("error"), dict):
+        ready.admission_error = dict(error_response["error"])
     set_ready = getattr(ready, "set", None)
     if callable(set_ready):
         set_ready()
@@ -626,6 +639,9 @@ def _remember_client_message_ack_locked(session: dict, client_message_id: str | 
     set_ready = getattr(admission.get("ready"), "set", None)
     if callable(set_ready):
         set_ready()
+    resolved = [cid for cid, entry in admissions.items() if isinstance(entry, dict) and "ack" in entry]
+    for cid in resolved[:-_MAX_RESOLVED_CLIENT_MESSAGE_ACKS]:
+        del admissions[cid]
 
 
 def _lock_in_submit_turn(
@@ -723,6 +739,8 @@ def _await_client_message_ack(rid, session: dict, client_message_id: str | None,
     """Wait outside history_lock for the winning admission to publish its exact ack."""
     wait = getattr(ready, "wait", None)
     if callable(wait) and wait(timeout=30.0):
+        if isinstance(error := getattr(ready, "admission_error", None), dict):
+            return {"jsonrpc": "2.0", "id": rid, "error": dict(error)}
         if (ack := _client_message_ack(session, client_message_id)) is not None:
             return _ok(rid, ack)
     return _err(rid, 4092, "matching prompt admission is still pending; retry")

@@ -489,8 +489,9 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any,
                     _ac_set_queue(session, queue_before)
                     if image_paths:
                         session["attached_images"] = image_paths + list(session.get("attached_images", []))
-                    _release_client_message_admission_locked(session, client_message_id)
-                    return _queued_prompt_persist_error(rid, exc)
+                    error = _queued_prompt_persist_error(rid, exc)
+                    _release_client_message_admission_locked(session, client_message_id, error)
+                    return error
                 staged = envelope.get("_submit_user_row") or {}
                 ack = {"status": "queued"}
                 if isinstance(staged.get("_row_id"), int):
