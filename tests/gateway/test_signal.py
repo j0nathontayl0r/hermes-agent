@@ -3,10 +3,13 @@ import asyncio
 import base64
 import pytest
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock, patch, AsyncMock
 from urllib.parse import quote
 
 from gateway.config import Platform, PlatformConfig
+from gateway.platforms.base import MessageEvent
 
 
 @pytest.fixture(autouse=True)
@@ -76,8 +79,18 @@ class TestSignalAdapterInit:
     def test_init_parses_config(self, monkeypatch):
         adapter = _make_signal_adapter(monkeypatch, group_allowed="group123,group456")
         assert adapter.http_url == "http://localhost:8080"
-        assert adapter.account == "+15551234567"
+        assert adapter.account == "+1555" + "1234567"
         assert "group123" in adapter.group_allow_from
+
+    def test_allowed_group_reactions_do_not_require_dm_access(self, monkeypatch):
+        monkeypatch.setenv("SIGNAL_ALLOWED_USERS", "__group_only__")
+        adapter = _make_signal_adapter(monkeypatch, group_allowed="group123")
+        event = cast(MessageEvent, SimpleNamespace(source=SimpleNamespace(
+            user_id="+15555559999", chat_type="group",
+            chat_id="group:group123", chat_id_alt="group123",
+        )))
+
+        assert adapter._reactions_enabled(event) is True
 
 
 class TestSignalConnectCleanup:
