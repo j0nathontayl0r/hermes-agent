@@ -555,10 +555,6 @@ def _run_after_agent_ready(
         user_timestamp=user_timestamp)
 
 
-# Resolved acks kept in memory per session; older ones replay from the durable user row
-# (``_client_message_ack``'s DB fallback), so the cap only bounds memory, never idempotency.
-_MAX_RESOLVED_CLIENT_MESSAGE_ACKS = 64
-
 _TRUNCATION_PARAMS = (
     "truncate_before_user_ordinal", "truncate_before_row_id", "truncate_before_message_id")
 
@@ -639,9 +635,6 @@ def _remember_client_message_ack_locked(session: dict, client_message_id: str | 
     set_ready = getattr(admission.get("ready"), "set", None)
     if callable(set_ready):
         set_ready()
-    resolved = [cid for cid, entry in admissions.items() if isinstance(entry, dict) and "ack" in entry]
-    for cid in resolved[:-_MAX_RESOLVED_CLIENT_MESSAGE_ACKS]:
-        del admissions[cid]
 
 
 def _lock_in_submit_turn(

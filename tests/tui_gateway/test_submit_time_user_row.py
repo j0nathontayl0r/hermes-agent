@@ -190,20 +190,29 @@ def test_failed_submit_persistence_releases_client_ack_reservation(monkeypatch, 
         db.close()
 
 
-def test_resolved_client_acks_are_bounded_without_dropping_pending_admissions():
+def test_exact_client_ack_with_survivor_rebind_fields_is_not_evicted():
     session = {"history_lock": threading.RLock()}
-    cap = server._MAX_RESOLVED_CLIENT_MESSAGE_ACKS
+    client_message_id = "truncate-original"
+    exact_ack = {
+        "status": "streaming",
+        "client_message_id": client_message_id,
+        "user_row_id": 41,
+        "user_timestamp": 1_790_594_548.125,
+        "survivor_user_row_ids": [17, None, 29],
+        "survivor_row_id_map": {"17": 117, "29": None},
+    }
     with session["history_lock"]:
-        pending = server._reserve_client_message_admission_locked(session, "still-pending")
-        for n in range(cap + 10):
+        server._remember_client_message_ack_locked(session, client_message_id, exact_ack)
+        for n in range(128):
             server._remember_client_message_ack_locked(
-                session, f"sent-{n}", {"status": "streaming", "client_message_id": f"sent-{n}"})
+                session,
+                f"sent-{n}",
+                {"status": "streaming", "client_message_id": f"sent-{n}", "user_row_id": n + 1},
+            )
+        replay, pending = server._live_client_message_admission_locked(session, client_message_id)
 
-    admissions = session["_client_message_admissions"]
-    resolved = [cid for cid, entry in admissions.items() if "ack" in entry]
-    assert len(resolved) == cap
-    assert f"sent-{cap + 9}" in resolved and "sent-0" not in resolved
-    assert admissions["still-pending"]["ready"] is pending and not pending.is_set()
+    assert pending is None
+    assert replay == exact_ack
 
 
 def test_concurrent_idle_retries_share_one_admission_and_original_ack(monkeypatch, tmp_path):
