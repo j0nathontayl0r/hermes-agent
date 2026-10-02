@@ -277,6 +277,12 @@ RUN python3 -m pm.build_env --source /opt/hermes --python /usr/local/bin/python3
     --out /opt/hermes/.venv --no-install-project --sealed \
     --extra all --extra messaging --extra otlp --extra anthropic --extra bedrock \
     --extra azure-identity --extra matrix --extra google-chat
+# Record what the sealed venv carries, as native bundles do. Without it the
+# first writable generation on the volume (e.g. a plugin-dependency install)
+# starts from no extras and replaces this venv, dropping mcp, aiohttp, etc.
+RUN python3 -c 'from pathlib import Path; from pm.features import installed_extras, write_features; \
+root = Path("/opt/hermes"); \
+write_features(installed_extras(root, root / ".venv", python_exe=root / ".venv/bin/python"), root)'
 
 # Icons render on the runtime environment: Pillow and resvg-py are core
 # dependencies. A stage of its own so the frontend stage keeps building its
