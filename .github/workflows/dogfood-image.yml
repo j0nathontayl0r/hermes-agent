@@ -120,7 +120,7 @@ jobs:
           from pathlib import Path
           from types import SimpleNamespace
           from gateway.config import GatewayConfig, Platform, PlatformConfig
-          from gateway.platforms.signal import SignalAdapter
+          from plugins.platforms.signal.adapter import SignalAdapter
           from gateway.run import GatewayRunner
           from gateway.session import SessionSource
           from tui_gateway.contracts.prompt_voice import PromptSubmitParams, PromptSubmitResult
