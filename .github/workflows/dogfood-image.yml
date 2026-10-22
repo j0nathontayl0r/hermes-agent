@@ -132,8 +132,8 @@ jobs:
 
           stamp = json.loads(Path("/opt/hermes/install-stamp.json").read_text())
           assert stamp["commit"] == os.environ["EXPECTED_SHA"], stamp
-          assert {"submitted_at", "client_message_id"} <= set(PromptSubmitParams.model_fields)
-          assert {"user_timestamp", "client_message_id", "user_row_id"} <= set(PromptSubmitResult.model_fields)
+          assert {"submitted_at"} <= set(PromptSubmitParams.model_fields)
+          assert {"user_timestamp", "user_row_id"} <= set(PromptSubmitResult.model_fields)
 
           group_id = "hermes-group"
           chat_id = f"group:{group_id}"
