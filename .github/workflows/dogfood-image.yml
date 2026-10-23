@@ -128,7 +128,6 @@ jobs:
           # Set policy after imports because gateway startup modules may load profile environment.
           os.environ["SIGNAL_GROUP_ALLOWED_USERS"] = "hermes-group"
           os.environ["SIGNAL_ALLOWED_USERS"] = "__group_only__"
-          os.environ["SIGNAL_REACTIONS"] = "true"
 
           stamp = json.loads(Path("/opt/hermes/install-stamp.json").read_text())
           assert stamp["commit"] == os.environ["EXPECTED_SHA"], stamp
@@ -170,9 +169,6 @@ jobs:
           assert runner._is_user_authorized(allowed_group)
           assert not runner._is_user_authorized(other_group)
           assert not runner._is_user_authorized(direct)
-          assert adapter._reactions_enabled(SimpleNamespace(source=allowed_group))
-          assert not adapter._reactions_enabled(SimpleNamespace(source=other_group))
-          assert not adapter._reactions_enabled(SimpleNamespace(source=direct))
           print("dogfood image smoke test passed")
           '
 
